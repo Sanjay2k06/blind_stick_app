@@ -130,6 +130,21 @@ class VoiceAlertManager {
   final Map<int, ObjectVoiceRecord> _recordsByTrackId = {};
   final Map<String, ObjectVoiceRecord> _recordsByClass = {};
 
+  bool _isPaused = false;
+  bool get isPaused => _isPaused;
+
+  /// Immediately pauses navigation and obstacle voice alerts.
+  void pause() {
+    _isPaused = true;
+    _currentSpeakingPriority = null;
+    _tts.stop();
+  }
+
+  /// Resumes navigation and obstacle voice alerts.
+  void resume() {
+    _isPaused = false;
+  }
+
   // Global Navigation State Memory
   NavigationAction? _lastAnnouncedAction;
   String? _lastAnnouncedSpokenText;
@@ -164,6 +179,7 @@ class VoiceAlertManager {
   /// - Priority preemption: STOP immediately preempts GO LEFT or GO RIGHT or CLEAR PATH.
   /// - Continuous clear-path periodic heartbeat (8-12 seconds).
   Future<void> processAlert(NavigationAlert? alert, {bool isTamil = true, DateTime? timestamp}) async {
+    if (_isPaused) return;
     final now = timestamp ?? DateTime.now();
 
     // 1. Clean up stale records genuinely gone for > 2000 ms grace period (preserve active alert)
@@ -417,6 +433,7 @@ class VoiceAlertManager {
 
   /// Speaks an explicit directive (e.g. path guidance, warnings) with serialization.
   Future<void> speakDirective(String phrase, {bool isEmergency = false}) async {
+    if (_isPaused) return;
     if (isEmergency) {
       _currentSpeakingPriority = AlertPriority.criticalObstacle;
       await _tts.stop();
@@ -437,6 +454,7 @@ class VoiceAlertManager {
 
   /// Clears history and resets state.
   void reset() {
+    _isPaused = false;
     _currentSpeakingPriority = null;
     _activeFocusKey = null;
     _lastSpeechTime = null;

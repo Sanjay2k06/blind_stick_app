@@ -244,5 +244,26 @@ void main() {
       expect(voiceService.parseCommand('அமைப்புகள்'), equals(VoiceCommand.openSettings));
       expect(voiceService.parseCommand('நபர்கள்'), equals(VoiceCommand.openPeople));
     });
+
+    test('Parses Speak mode commands (location, time, help, what is in front)', () {
+      expect(voiceService.parseCommand('location'), equals(VoiceCommand.whereAmI));
+      expect(voiceService.parseCommand('current location'), equals(VoiceCommand.whereAmI));
+      expect(voiceService.parseCommand('my location'), equals(VoiceCommand.whereAmI));
+      expect(voiceService.parseCommand('இருப்பிடம்'), equals(VoiceCommand.whereAmI));
+      expect(voiceService.parseCommand('இடம்'), equals(VoiceCommand.whereAmI));
+      expect(voiceService.parseCommand('time'), equals(VoiceCommand.time));
+      expect(voiceService.parseCommand('what time is it'), equals(VoiceCommand.time));
+      expect(voiceService.parseCommand('நேரம்'), equals(VoiceCommand.time));
+      expect(voiceService.parseCommand('மணி என்ன'), equals(VoiceCommand.time));
+      expect(voiceService.parseCommand('help'), equals(VoiceCommand.help));
+      expect(voiceService.parseCommand('commands'), equals(VoiceCommand.help));
+      expect(voiceService.parseCommand('வழிமுறைகள்'), equals(VoiceCommand.help));
+      expect(voiceService.parseCommand('உதவிக்குறிப்பு'), equals(VoiceCommand.help));
+      expect(voiceService.parseCommand('முன்னாடி என்ன இருக்கு'), equals(VoiceCommand.whatIsInFront));
+      expect(voiceService.parseCommand('முன்னாடி என்ன இருக்கு?'), equals(VoiceCommand.whatIsInFront));
+      expect(voiceService.parseCommand('முன்னால் என்ன இருக்கிறது'), equals(VoiceCommand.whatIsInFront));
+      expect(voiceService.parseCommand('what is in front'), equals(VoiceCommand.whatIsInFront));
+      expect(voiceService.parseCommand('what is ahead'), equals(VoiceCommand.whatIsInFront));
+    });
   });
 }

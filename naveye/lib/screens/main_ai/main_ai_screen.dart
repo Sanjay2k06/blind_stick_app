@@ -25,6 +25,10 @@ import '../../services/ocr_service.dart';
 import '../../services/object_finder_service.dart';
 import '../../services/emergency_sos_service.dart';
 import '../../services/startup_flow_manager.dart';
+import '../../services/location_service.dart';
+import '../../services/reverse_geocoding_service.dart';
+import '../../services/tamil_location_formatter.dart';
+import '../../services/tamil_time_formatter.dart';
 import '../startup/calm_startup_overlay.dart';
 
 String formatLocationSummary(double latitude, double longitude, {bool isTamil = true}) {
@@ -109,6 +113,8 @@ class _MainAIScreenState extends State<MainAIScreen>
   bool _isStreaming    = false;
   bool _modelReady    = false;
   bool _voiceActive   = false;
+  bool _detectionPausedForVoice = false;
+  bool _wasDetectingBeforeVoice = false;
 
   String _statusText  = 'Initializing...';
   String _detLabel    = '';
@@ -452,7 +458,7 @@ class _MainAIScreenState extends State<MainAIScreen>
 
   Future<void> _processFrame(CameraImage frame) async {
     // Drop frames if not detecting or model not ready yet — stream stays warm
-    if (!_isDetecting || !_modelReady) return;
+    if (!_isDetecting || !_modelReady || _voiceActive || _detectionPausedForVoice) return;
     if (_busy) return;
     final now = DateTime.now();
     // Allow frames to stream at ~5 FPS (every 200 ms) so temporal stabilizer works smoothly
@@ -654,73 +660,99 @@ class _MainAIScreenState extends State<MainAIScreen>
     if (mounted) setState(() => _voiceActive = false);
   }
 
+  void _resumeDetectionIfNeeded() {
+    _voiceAlert.resume();
+    _detectionPausedForVoice = false;
+    if (mounted) {
+      setState(() {
+        _voiceActive = false;
+        if (_wasDetectingBeforeVoice && _isDetecting) {
+          _statusText = 'வழிகாட்டுதல் செயலில் உள்ளது';
+        }
+      });
+    }
+    _wasDetectingBeforeVoice = false;
+  }
+
   Future<void> _startVoiceListen() async {
-    // Always cancel any pending timeout first to avoid a race where the old
-    // timer fires during the new listen session and resets voice state.
     _voiceTimeout?.cancel();
     _voiceTimeout = null;
 
     // Tap again while active → cancel (toggle off)
     if (_voiceActive) {
       _resetVoiceState();
-      await _tts.speakNow('ரத்து செய்யப்பட்டது.');
+      await _tts.speakAndWait('ரத்து செய்யப்பட்டது.');
+      _resumeDetectionIfNeeded();
       return;
     }
 
+    _wasDetectingBeforeVoice = _isDetecting;
+    _detectionPausedForVoice = true;
+
+    // Immediately pause object detection & detection/navigation TTS and stop ongoing speech
+    _voiceAlert.pause();
+    await _voiceAlert.stop();
     await _tts.stop();
+    _tts.mute();
+
     HapticFeedback.heavyImpact();
-    setState(() => _voiceActive = true);
+    if (mounted) {
+      setState(() {
+        _voiceActive = true;
+        _statusText = 'குரல் கட்டளை கேட்கிறது...';
+      });
+    }
 
-    // ── Audio confirmation ────────────────────────────────────────────────────
-    await _tts.speakNow('கேட்கிறது — தொடங்கு, நிறுத்து, அல்லது உதவி எனச் சொல்லுங்கள்');
-    await Future.delayed(const Duration(milliseconds: 1300));
-
-    _tts.mute(); // mute obstacle TTS while mic is active
-
-    // Safety: auto-cancel after 12 s if no command received
+    // Safety: auto-cancel after 10 s if no command received
     _voiceTimeout?.cancel();
-    _voiceTimeout = Timer(const Duration(seconds: 12), () {
+    _voiceTimeout = Timer(const Duration(seconds: 10), () async {
       _resetVoiceState();
-      _tts.speakNow('கட்டளை எதுவும் கேட்கவில்லை.');
+      await _tts.speakAndWait('கட்டளை எதுவும் கேட்கவில்லை.');
+      _resumeDetectionIfNeeded();
     });
 
-    if (!_voiceActive) return; // was cancelled during the delay
-
-    await _voice.startListening((cmd) async {
+    try {
+      await _voice.startListening((cmd) async {
+        _voiceTimeout?.cancel();
+        _voiceTimeout = null;
+        _resetVoiceState();
+        await _handleCmd(cmd);
+        _resumeDetectionIfNeeded();
+      });
+    } catch (e) {
+      debugPrint('startVoiceListen error: $e');
       _resetVoiceState();
-      // Audio feedback on result
-      if (cmd != VoiceCommand.unknown) {
-        await _tts.speakNow('புரிந்தது.');
-      } else {
-        await _tts.speakNow('மன்னிக்கவும், சரியாகக் கேட்கவில்லை. மீண்டும் சொல்லவும்.');
-      }
-      await _handleCmd(cmd);
-    });
+      await _tts.speakAndWait('குரல் பதிவை இயக்க முடியவில்லை.');
+      _resumeDetectionIfNeeded();
+    }
   }
 
   Future<void> _handleCmd(VoiceCommand cmd) async {
     switch (cmd) {
       case VoiceCommand.start:
+        _wasDetectingBeforeVoice = true;
         if (!_isDetecting) await _toggleDetection();
         break;
       case VoiceCommand.stop:
+        _wasDetectingBeforeVoice = false;
+        _detectionPausedForVoice = false;
         if (_finderModeActive) {
           _finderModeActive = false;
           ObjectFinderService.instance.cancel();
-          await _tts.speakNow('பொருள் தேடுதல் நிறுத்தப்பட்டது.');
+          await _tts.speakAndWait('பொருள் தேடுதல் நிறுத்தப்பட்டது.');
         }
         if (_isDetecting) await _toggleDetection();
         break;
       case VoiceCommand.repeat:
-        await _tts.speakNow(
+        await _tts.speakAndWait(
           _lastAnnouncement.isNotEmpty ? _lastAnnouncement : 'மீண்டும் சொல்ல எதுவும் இல்லை.');
         break;
       case VoiceCommand.whoIsThis:
-        await _tts.speakNow('முன்னால் யார் இருக்கிறார் என்று பார்க்கிறேன்.');
+        await _tts.speakAndWait('முன்னால் யார் இருக்கிறார் என்று பார்க்கிறேன்.');
 
         img.Image? checkFrame = _lastFrame;
 
-        // Fix 6: if detection is stopped, take a single snapshot
+        // If detection is stopped, take a single snapshot
         if (checkFrame == null && _cam != null && _cameraReady && !_isStreaming) {
           try {
             final xFile = await _cam!.takePicture();
@@ -737,26 +769,26 @@ class _MainAIScreenState extends State<MainAIScreen>
               .recogniseInFrame(checkFrame);
           if (match != null) {
             final nameTa = match.name.toLowerCase() == 'loki' ? 'லோகி' : match.name;
-            await _tts.speakNow('அவர் $nameTa.');
+            await _tts.speakAndWait('அவர் $nameTa.');
           } else {
-            await _tts.speakNow(
+            await _tts.speakAndWait(
                 'தெரிந்த முகம் எதுவும் இல்லை. இவர் அறியப்படாத நபர்.');
           }
         } else {
-          await _tts.speakNow('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+          await _tts.speakAndWait('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
         }
         break;
       case VoiceCommand.emergencySOS:
-        await _tts.speakNow('அவசர உதவி செயல்படுத்தப்படுகிறது.');
+        await _tts.speakAndWait('அவசர உதவி செயல்படுத்தப்படுகிறது.');
         final payload = await EmergencySosService.instance.triggerSos();
         if (payload.emergencyContact.isNotEmpty) {
-          await _tts.speakNow('அவசர செய்தி மற்றும் இருப்பிடம் அனுப்பப்படுகிறது.');
+          await _tts.speakAndWait('அவசர செய்தி மற்றும் இருப்பிடம் அனுப்பப்படுகிறது.');
         } else {
-          await _tts.speakNow('அவசர தொடர்பு எண் பதிவு செய்யப்படவில்லை. இருப்பிடம் சேமிக்கப்பட்டது.');
+          await _tts.speakAndWait('அவசர தொடர்பு எண் பதிவு செய்யப்படவில்லை. இருப்பிடம் சேமிக்கப்பட்டது.');
         }
         break;
       case VoiceCommand.identifyCurrency:
-        await _tts.speakNow('ரூபாய் நோட்டை சரிபார்க்கிறேன்.');
+        await _tts.speakAndWait('ரூபாய் நோட்டை சரிபார்க்கிறேன்.');
         img.Image? currFrame = _lastFrame;
         if (currFrame == null && _cam != null && _cameraReady && !_isStreaming) {
           try {
@@ -790,13 +822,13 @@ class _MainAIScreenState extends State<MainAIScreen>
             image: currFrame,
             ocrText: ocrText,
           );
-          await _tts.speakNow(currResult.spokenTextTa);
+          await _tts.speakAndWait(currResult.spokenTextTa);
         } else {
-          await _tts.speakNow('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+          await _tts.speakAndWait('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
         }
         break;
       case VoiceCommand.readText:
-        await _tts.speakNow('வாசகம் படிக்கப்படுகிறது.');
+        await _tts.speakAndWait('வாசகம் படிக்கப்படுகிறது.');
         String? ocrPath;
         if (_cam != null && _cameraReady) {
           try {
@@ -821,9 +853,9 @@ class _MainAIScreenState extends State<MainAIScreen>
             final f = File(ocrPath);
             if (await f.exists()) await f.delete();
           } catch (_) {}
-          await _tts.speakNow(ocrResult.spokenTextTa);
+          await _tts.speakAndWait(ocrResult.spokenTextTa);
         } else {
-          await _tts.speakNow('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+          await _tts.speakAndWait('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
         }
         break;
       case VoiceCommand.findObject:
@@ -834,34 +866,34 @@ class _MainAIScreenState extends State<MainAIScreen>
           await _toggleDetection();
         }
         final targetTa = ObjectFinderService.instance.getTamilName(target ?? query);
-        await _tts.speakNow('$targetTa தேடும் முறை இயக்கப்பட்டது. கேமராவை மெதுவாக சுழற்றவும்.');
+        await _tts.speakAndWait('$targetTa தேடும் முறை இயக்கப்பட்டது. கேமராவை மெதுவாக சுழற்றவும்.');
         break;
       case VoiceCommand.toggleTorch:
         if (_cam != null && _cameraReady) {
           try {
             _torchActive = !_torchActive;
             await _cam!.setFlashMode(_torchActive ? FlashMode.torch : FlashMode.off);
-            await _tts.speakNow(_torchActive ? 'டார்ச் ஆன் செய்யப்பட்டது.' : 'டார்ச் அணைக்கப்பட்டது.');
+            await _tts.speakAndWait(_torchActive ? 'டார்ச் ஆன் செய்யப்பட்டது.' : 'டார்ச் அணைக்கப்பட்டது.');
           } catch (e) {
             debugPrint('Torch toggle error: $e');
-            await _tts.speakNow('டார்ச் இயக்க முடியவில்லை.');
+            await _tts.speakAndWait('டார்ச் இயக்க முடியவில்லை.');
           }
         } else {
-          await _tts.speakNow('கேமரா தயாராகவில்லை.');
+          await _tts.speakAndWait('கேமரா தயாராகவில்லை.');
         }
         break;
       case VoiceCommand.fasterSpeed:
         final newMultiplier = (_tts.speechRateMultiplier + 0.25).clamp(1.0, 2.0);
         await _tts.setSpeechRateMultiplier(newMultiplier);
-        await _tts.speakNow('குரல் வேகம் அதிகரிக்கப்பட்டது.');
+        await _tts.speakAndWait('குரல் வேகம் அதிகரிக்கப்பட்டது.');
         break;
       case VoiceCommand.slowerSpeed:
         final newMultiplier = (_tts.speechRateMultiplier - 0.25).clamp(1.0, 2.0);
         await _tts.setSpeechRateMultiplier(newMultiplier);
-        await _tts.speakNow('குரல் வேகம் குறைக்கப்பட்டது.');
+        await _tts.speakAndWait('குரல் வேகம் குறைக்கப்பட்டது.');
         break;
       case VoiceCommand.openSettings:
-        await _tts.speakNow('அமைப்புகள் திறக்கப்படுகிறது.');
+        await _tts.speakAndWait('அமைப்புகள் திறக்கப்படுகிறது.');
         if (mounted) {
           await Navigator.pushNamed(context, AppRoutes.settings);
           await _detector.refreshSensitivity();
@@ -874,30 +906,76 @@ class _MainAIScreenState extends State<MainAIScreen>
         _showPeopleMenu();
         break;
       case VoiceCommand.help:
-        await _tts.speakNow(
-          'பயன்படுத்தக்கூடிய கட்டளைகள்: தொடங்கு, நிறுத்து, ரூபாய் நோட்டு, வாசகம் படி, எங்கே இருக்கிறது, அவசரம், டார்ச், வேகமாக பேசு, மெதுவாக பேசு, யார் இது, நபர்கள், அமைப்புகள், உதவி.');
+        const helpText = 'பயன்படுத்தக்கூடிய கட்டளைகள்: இருப்பிடம், நேரம், முன்னாடி என்ன இருக்கு, மற்றும் உதவி.';
+        await _tts.speakAndWait(helpText);
         break;
       case VoiceCommand.whereAmI:
-        await _tts.speakNow('உங்கள் இருப்பிடத்தைச் சரிபார்க்கிறது.');
+        String locationAnswer = 'உங்கள் இருப்பிடத்தைப் பெற முடியவில்லை.';
+        try {
+          final locationService = LocationService(timeout: const Duration(seconds: 4));
+          final position = await locationService.getCurrentLocation(maxRetries: 2);
+          if (position != null) {
+            final geocoded = await ReverseGeocodingService().reverseGeocode(
+              position.latitude,
+              position.longitude,
+            );
+            locationAnswer = TamilLocationFormatter.formatLocation(geocoded);
+          }
+        } catch (e) {
+          debugPrint('Voice location error: $e');
+        }
+        await _tts.speakAndWait(locationAnswer);
         break;
+      case VoiceCommand.time:
+        final timeSentence = TamilTimeFormatter.formatTime(DateTime.now());
+        await _tts.speakAndWait(timeSentence);
+        break;
+      case VoiceCommand.whatIsInFront:
       case VoiceCommand.detectObjects:
-        if (!_isDetecting) await _toggleDetection();
+        String frontAnswer;
+        if (_lastFrame != null) {
+          try {
+            final results = await _detector.detect(_lastFrame!);
+            if (results.isNotEmpty) {
+              final stabilized = _stabilizer.processFrame(results, timestamp: DateTime.now());
+              final alert = _decisionEngine.evaluate(stabilized, timestamp: DateTime.now());
+              if (alert != null && alert.spokenTextTa.isNotEmpty) {
+                frontAnswer = alert.spokenTextTa;
+              } else {
+                final topObj = results.first;
+                frontAnswer = 'முன்னால் ${topObj.label} உள்ளது.';
+              }
+            } else {
+              frontAnswer = 'முன்னால் பாதை தெளிவாக உள்ளது. எந்த தடைகளும் இல்லை.';
+            }
+          } catch (e) {
+            debugPrint('whatIsInFront error: $e');
+            frontAnswer = _lastAnnouncement.isNotEmpty
+                ? _lastAnnouncement
+                : 'முன்னால் பாதை தெளிவாக உள்ளது.';
+          }
+        } else if (_lastAnnouncement.isNotEmpty) {
+          frontAnswer = _lastAnnouncement;
+        } else {
+          frontAnswer = 'முன்னால் பாதை தெளிவாக உள்ளது.';
+        }
+        await _tts.speakAndWait(frontAnswer);
         break;
       case VoiceCommand.switchCamera:
-        await _tts.speakNow('கேமரா மாற்றப்படுகிறது.');
+        await _tts.speakAndWait('கேமரா மாற்றப்படுகிறது.');
         break;
       case VoiceCommand.changeLanguage:
-        await _tts.speakNow('மொழி மாற்றப்பட்டது.');
+        await _tts.speakAndWait('மொழி மாற்றப்பட்டது.');
         break;
       case VoiceCommand.addPerson:
         _showPeopleMenu();
         break;
       case VoiceCommand.cancel:
       case VoiceCommand.goBack:
-        await _tts.speakNow('ரத்து செய்யப்பட்டது.');
+        await _tts.speakAndWait('ரத்து செய்யப்பட்டது.');
         break;
       case VoiceCommand.unknown:
-        await _tts.speakNow('கட்டளை புரியவில்லை. உதவி எனக் கூறவும்.');
+        await _tts.speakAndWait('மன்னிக்கவும், புரியவில்லை. உதவி எனக் கூறவும்.');
         break;
     }
   }

@@ -26,6 +26,8 @@ enum VoiceCommand {
   toggleTorch,
   fasterSpeed,
   slowerSpeed,
+  time,
+  whatIsInFront,
   unknown
 }
 
@@ -197,6 +199,11 @@ class VoiceCommandService {
     if (words.isEmpty) { return VoiceCommand.unknown; }
     final lower = words.toLowerCase().trim();
 
+    // Help instructions (distinguish from emergency distress cry)
+    if (_has(lower, ['help', 'commands', 'assist', 'guide', 'instructions', 'what can', 'வழிமுறைகள்', 'உதவிக்குறிப்பு', 'கட்டளைகள்', 'உதவிக்குறிப்புகள்'])) {
+      return VoiceCommand.help;
+    }
+
     // 1. Emergency SOS has the absolute highest priority
     if (_has(lower, ['அவசரம்', 'காப்பாற்று', 'ஆபத்து', 'sos', 'emergency', 'distress', 'அவசர உதவி', 'உதவி'])) {
       return VoiceCommand.emergencySOS;
@@ -238,13 +245,57 @@ class VoiceCommandService {
     if (_has(lower, ['who', 'identify', 'name', 'face', 'recognize', 'recognise', 'யார்', 'முகம்'])) {
       return VoiceCommand.whoIsThis;
     }
-    if (_has(lower, ['where am i', 'where am i now', 'current location', 'my location', 'location', 'நான் எங்கே', 'இருப்பிடம்', 'இடம்'])) {
+    if (_has(lower, ['where am i', 'where am i now', 'current location', 'my location', 'location', 'நான் எங்கே', 'இருப்பிடம்', 'இடம்', 'என் இருப்பிடம்', 'எங்கே இருக்கிறேன்', 'என் இடம்', 'தற்போதைய இருப்பிடம்'])) {
       return VoiceCommand.whereAmI;
     }
-    if (_has(lower, ['detect object', 'detect objects', 'scan around', 'what is in front', 'what is ahead', 'look around', 'தடை', 'பார்'])) {
-      return VoiceCommand.detectObjects;
+    if (_has(lower, [
+      'முன்னாடி என்ன இருக்கு',
+      'முன்னாடி என்ன இருக்கிறது',
+      'முன்னாடி என்ன இருக்குது',
+      'முன்னாடி என்ன',
+      'முன்னாடி',
+      'முன்னால் என்ன இருக்கிறது',
+      'முன்னால் என்ன இருக்கு',
+      'முன்னால் என்ன',
+      'முன்னே என்ன இருக்கிறது',
+      'முன்னே என்ன இருக்கு',
+      'முன்னே என்ன',
+      'எதிரே என்ன இருக்கிறது',
+      'எதிரில் என்ன இருக்கு',
+      'என்ன இருக்கு',
+      'what is in front',
+      'what is ahead',
+      'what\'s in front',
+      'what is ahead of me',
+      'what is in front of me',
+      'front',
+      'ahead',
+      'obstacles',
+      'detect object',
+      'detect objects',
+      'scan around',
+      'look around',
+      'தடை',
+      'பார்',
+    ])) {
+      return VoiceCommand.whatIsInFront;
     }
-    if (_has(lower, ['front camera', 'selfie camera', 'front', 'rear camera', 'back camera', 'switch camera', 'camera', 'கேமரா'])) {
+    if (_has(lower, [
+      'time',
+      'what time',
+      'what time is it',
+      'current time',
+      'what is the time',
+      'tell me the time',
+      'நேரம்',
+      'என்ன நேரம்',
+      'மணி என்ன',
+      'இப்போது மணி என்ன',
+      'இப்போ மணி என்ன',
+    ])) {
+      return VoiceCommand.time;
+    }
+    if (_has(lower, ['front camera', 'selfie camera', 'front camera switch', 'rear camera', 'back camera', 'switch camera', 'camera', 'கேமரா'])) {
       return VoiceCommand.switchCamera;
     }
     if (_has(lower, ['change language', 'switch language', 'language to', 'english', 'tamil', 'sinhala', 'மொழி', 'தமிழ்', 'ஆங்கிலம்'])) {
@@ -258,9 +309,6 @@ class VoiceCommandService {
     }
     if (_has(lower, ['people', 'persons', 'faces', 'contacts', 'manage', 'நபர்கள்', 'மனிதர்கள்'])) {
       return VoiceCommand.openPeople;
-    }
-    if (_has(lower, ['help', 'commands', 'assist', 'guide', 'instructions', 'what can', 'வழிமுறைகள்', 'உதவிக்குறிப்பு', 'கட்டளைகள்'])) {
-      return VoiceCommand.help;
     }
     if (_has(lower, ['cancel', 'close', 'dismiss', 'stop listening', 'ரத்து'])) {
       return VoiceCommand.cancel;
