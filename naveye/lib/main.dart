@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'services/nav_eye_foreground_service.dart';
+import 'services/supabase_people_service.dart';
 import 'theme/app_theme.dart';
 import 'theme/app_routes.dart';
 import 'screens/auth/user_profile_screen.dart';
@@ -19,6 +21,12 @@ import 'screens/people/people_list_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await Supabase.initialize(
+    url: 'https://kfhnalgqqwehoquvwokk.supabase.co',
+    publishableKey: 'sb_publishable_TUx95xZLtOiIu1KXnkt-ug_sZ9x_RoY',
+  );
+
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
@@ -29,6 +37,7 @@ void main() async {
   // The actual service is only STARTED when detection begins — this
   // call just registers the notification channel and task options.
   NavEyeForegroundService.init();
+  SupabasePeopleService.instance.startBackgroundSync();
 
   final prefs = await SharedPreferences.getInstance();
   final bool onboardingDone = prefs.getBool('onboarding_complete') ?? false;
@@ -43,7 +52,7 @@ class NavEyeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'NavEye',
+      title: 'Veyra',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark,
       initialRoute: onboardingDone ? AppRoutes.mainAI : AppRoutes.onboardingStart,

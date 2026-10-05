@@ -1,16 +1,17 @@
 import 'package:flutter/material.dart';
 
 class AppColors {
-  static const Color background = Color(0xFF1A1A1A);
-  static const Color surface = Color(0xFF2A2A2A);
-  static const Color yellow = Color(0xFFFFCC00);
-  static const Color green = Color(0xFF4CAF50);
-  static const Color white = Color(0xFFFFFFFF);
-  static const Color grey = Color(0xFF888888);
-  static const Color greyLight = Color(0xFFAAAAAA);
-  static const Color greyDark = Color(0xFF444444);
-  static const Color inputBg = Color(0xFF333333);
-  static const Color danger = Color(0xFFE53935);
+  static const Color background = Color(0xFF000000); // Strict Pure Black
+  static const Color surface = Color(0xFF121212);    // Dark neutral surface
+  static const Color yellow = Color(0xFFFFFFFF);     // High contrast pure white
+  static const Color green = Color(0xFFFFFFFF);      // High contrast pure white
+  static const Color white = Color(0xFFFFFFFF);      // Pure white
+  static const Color black = Color(0xFF000000);      // Pure black
+  static const Color grey = Color(0xFFB0B0B0);       // Accessible secondary light gray
+  static const Color greyLight = Color(0xFFE0E0E0);  // High-contrast secondary
+  static const Color greyDark = Color(0xFF262626);   // Dark gray for borders/dividers
+  static const Color inputBg = Color(0xFF1A1A1A);
+  static const Color danger = Color(0xFFFFFFFF);     // High contrast white
 }
 
 class AppTheme {
@@ -19,33 +20,35 @@ class AppTheme {
       brightness: Brightness.dark,
       scaffoldBackgroundColor: AppColors.background,
       colorScheme: const ColorScheme.dark(
-        primary: AppColors.yellow,
-        secondary: AppColors.green,
+        primary: AppColors.white,
+        secondary: AppColors.greyLight,
         surface: AppColors.surface,
+        onPrimary: AppColors.black,
+        onSurface: AppColors.white,
       ),
       appBarTheme: const AppBarTheme(
         backgroundColor: AppColors.background,
         elevation: 0,
         iconTheme: IconThemeData(color: AppColors.white),
-        titleTextStyle: TextStyle(color: AppColors.white, fontSize: 18, fontWeight: FontWeight.w600),
+        titleTextStyle: TextStyle(color: AppColors.white, fontSize: 20, fontWeight: FontWeight.w700),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.yellow,
-          foregroundColor: Colors.black,
-          minimumSize: const Size(double.infinity, 52),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+          backgroundColor: AppColors.white,
+          foregroundColor: AppColors.black,
+          minimumSize: const Size(double.infinity, 56),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: AppColors.inputBg,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.yellow, width: 1.5)),
-        hintStyle: const TextStyle(color: AppColors.grey, fontSize: 14),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.greyDark, width: 1.5)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.greyDark, width: 1.5)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.white, width: 2.0)),
+        hintStyle: const TextStyle(color: AppColors.grey, fontSize: 16),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
       ),
     );
   }

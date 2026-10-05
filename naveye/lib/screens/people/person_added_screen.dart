@@ -31,9 +31,8 @@ class _PersonAddedScreenState extends State<PersonAddedScreen> {
   Future<void> _onReady() async {
     await _tts.init();
     await _tts.speakNow(
-      '$_name has been saved to NavEye. '
-      'NavEye will now recognise $_name when they appear in front of the camera. '
-      'Returning to main screen in 5 seconds.',
+      '$_name வெற்றிகரமாகப் பதிவு செய்யப்பட்டார். '
+      'இனி கேமராவின் முன்னால் வரும்போது அவர் அடையாளம் காணப்படுவார்.',
     );
 
     // Auto-navigate countdown
@@ -92,7 +91,7 @@ class _PersonAddedScreenState extends State<PersonAddedScreen> {
             const SizedBox(height: 10),
 
             Text(
-              '$_name has been saved.\nNavEye will now recognise them.',
+              '$_name has been saved.\nVeyra will now recognise them.',
               textAlign: TextAlign.center,
               style: const TextStyle(color: AppColors.greyLight, fontSize: 15, height: 1.5),
             ),

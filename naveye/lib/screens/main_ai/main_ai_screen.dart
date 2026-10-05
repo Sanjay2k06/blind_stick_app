@@ -17,6 +17,22 @@ import '../../services/voice_command_service.dart';
 import '../../services/shared_stt.dart';
 import '../../services/nav_eye_foreground_service.dart';
 import '../../services/system_monitor_service.dart';
+import '../../services/detection_stabilizer.dart';
+import '../../services/navigation_decision_engine.dart';
+import '../../services/voice_alert_manager.dart';
+import '../../services/currency_recognition_service.dart';
+import '../../services/ocr_service.dart';
+import '../../services/object_finder_service.dart';
+import '../../services/emergency_sos_service.dart';
+import '../../services/startup_flow_manager.dart';
+import '../startup/calm_startup_overlay.dart';
+
+String formatLocationSummary(double latitude, double longitude, {bool isTamil = true}) {
+  if (isTamil) {
+    return 'உங்கள் இருப்பிடம் அட்சரேகை ${latitude.toStringAsFixed(3)}, தீர்க்கரேகை ${longitude.toStringAsFixed(3)}.';
+  }
+  return 'Your location is latitude ${latitude.toStringAsFixed(3)} and longitude ${longitude.toStringAsFixed(3)}.';
+}
 
 // ── Fix 1: Top-level YUV→RGB — runs in a background isolate via compute() ───
 // Must be top-level (not a method) so Dart can spawn it in a separate isolate.
@@ -99,41 +115,106 @@ class _MainAIScreenState extends State<MainAIScreen>
   String _direction   = 'CENTRE';
   String _distance    = '';
   double _distanceM   = 100.0;
+  NavigationState _currentNavState = NavigationState.clear;
+  NavigationAction _currentNavAction = NavigationAction.clear;
+
+  bool _torchActive = false;
+  bool _finderModeActive = false;
+  final List<DateTime> _recentTapTimestamps = [];
+
+  void _recordTapAndCheckSos() {
+    final now = DateTime.now();
+    _recentTapTimestamps.add(now);
+    _recentTapTimestamps.removeWhere((t) => now.difference(t).inMilliseconds > 1200);
+    if (_recentTapTimestamps.length >= 3) {
+      _recentTapTimestamps.clear();
+      _handleCmd(VoiceCommand.emergencySOS);
+    }
+  }
+
+  bool get _isStopAction =>
+      _currentNavAction == NavigationAction.stop ||
+      _distanceM < 1.2 ||
+      _currentNavState == NavigationState.criticalStop ||
+      _currentNavState == NavigationState.knownPersonVeryClose;
+
+  String get _navigationStatusHeader {
+    if (_currentNavState == NavigationState.clear || _currentNavAction == NavigationAction.clear) {
+      return 'முன்னால் பாதை தெளிவாக உள்ளது';
+    }
+    if (_isStopAction) {
+      return 'முன்னால் தடை உள்ளது';
+    }
+    if (_currentNavState == NavigationState.obstacleLeft) {
+      return 'இடப்பக்கம் தடையுள்ளது';
+    }
+    if (_currentNavState == NavigationState.obstacleRight) {
+      return 'வலப்பக்கம் தடையுள்ளது';
+    }
+    if (_currentNavState == NavigationState.knownPersonLeft) {
+      return 'லோகி இடப்பக்கத்தில் உள்ளார்';
+    }
+    if (_currentNavState == NavigationState.knownPersonRight) {
+      return 'லோகி வலப்பக்கத்தில் உள்ளார்';
+    }
+    if (_currentNavState == NavigationState.knownPersonCenter) {
+      return 'லோகி முன்னால் உள்ளார்';
+    }
+    return 'முன்னால் தடை உள்ளது';
+  }
+
+  String get _navigationActionDirective {
+    if (_isStopAction) {
+      return 'நிறுத்தவும்';
+    }
+    if (_currentNavAction == NavigationAction.goLeft) {
+      return 'இடப்பக்கம் செல்லவும்';
+    }
+    if (_currentNavAction == NavigationAction.goRight) {
+      return 'வலப்பக்கம் செல்லவும்';
+    }
+    return 'செல்லலாம்';
+  }
+
+  IconData get _navigationActionIcon {
+    if (_isStopAction) {
+      return Icons.pan_tool;
+    }
+    if (_currentNavAction == NavigationAction.goLeft) {
+      return Icons.arrow_back;
+    }
+    if (_currentNavAction == NavigationAction.goRight) {
+      return Icons.arrow_forward;
+    }
+    return Icons.arrow_upward;
+  }
 
   // ── Services ──────────────────────────────────────────────────────────────
   final DetectorService     _detector = DetectorService();
   final TtsService          _tts      = TtsService();
   final VoiceCommandService _voice    = VoiceCommandService();
+  final DetectionStabilizer _stabilizer = DetectionStabilizer(
+    stabilityThresholdMs: 350,
+    confidenceThreshold: 0.50,
+  );
+  final NavigationDecisionEngine _decisionEngine = NavigationDecisionEngine();
+  late final VoiceAlertManager _voiceAlert;
+  bool _debugModeEnabled = false;
   SystemMonitorService?     _monitor;   // battery + connectivity alerts
   bool _serviceActive = false;          // true when foreground service is running
 
   // ── Timing / throttle ─────────────────────────────────────────────────────
   DateTime   _lastDetection      = DateTime.now();
-  DateTime   _lastFaceCheck      = DateTime.now();
-  DateTime   _lastResultTime     = DateTime.now();
   String     _lastAnnouncement   = '';
-  double     _lastAnnouncedDist  = 100.0;              // track distance for re-announce
   bool       _vibrationEnabled   = true;
   bool       _busy               = false;              // prevents frame queue buildup
-  bool       _pathClearAnnounced = false;
-
-  // ── Per-label cooldown + global minimum gap between announcements ────────
-  final Map<String, DateTime> _labelLastAnnounced = {};
-  DateTime _lastAnnouncedAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const int _globalCooldownMs  = 3000; // min gap between any two TTS calls
-  static const int _perLabelCooldownMs = 9000; // same object repeats every 9 s
 
   // ── Fix 11: low-light tracking ───────────────────────────────────────────
-  bool     _darkWarned     = false;
   DateTime _lastDarkCheck  = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // ── Face recognition cache ────────────────────────────────────────────────
-  String?         _cachedName;
-  DateTime        _cacheExpiry = DateTime.fromMillisecondsSinceEpoch(0);
+  // ── Last camera frame snapshot ───────────────────────────────────────────
   img.Image?      _lastFrame;
 
-  // ── Sequential TTS queue — only ONE pending slot (latest important wins) ──
-  String?         _pendingAnnouncement;
 
   // ── Bounding box overlay ──────────────────────────────────────────────────
   DetectionResult? _topResult;   // carries box coords for the painter
@@ -148,6 +229,7 @@ class _MainAIScreenState extends State<MainAIScreen>
   // ── Pulse animation ───────────────────────────────────────────────────────
   late AnimationController _pulse;
   late Animation<double>   _pulseAnim;
+  late final StartupFlowManager _startupFlowManager;
 
   // ─────────────────────────────────────────────────────────────────────────
   @override
@@ -159,47 +241,49 @@ class _MainAIScreenState extends State<MainAIScreen>
       ..repeat(reverse: true);
     _pulseAnim = Tween<double>(begin: 0.5, end: 1.0)
         .animate(CurvedAnimation(parent: _pulse, curve: Curves.easeInOut));
+
+    _startupFlowManager = StartupFlowManager(
+      onStartCamera: () async {
+        await _initCamera();
+      },
+      onStartDetection: () async {
+        if (!_modelReady) {
+          await Future.wait([
+            _detector.loadModel(),
+            _detector.refreshSensitivity(),
+            FaceRecognitionService.instance.init(),
+          ]);
+          if (mounted) {
+            setState(() => _modelReady = _detector.isLoaded);
+          }
+        }
+        if (mounted) {
+          await _startDetectionSilent();
+        }
+      },
+    );
+
     _init();
   }
 
   Future<void> _init() async {
-    // ── Parallel startup — TTS, model, camera, prefs all at once ─────────────
+    // ── Preload lightweight services (TTS, background monitor, preferences) ──
     await _tts.init();
-    // Start battery + connectivity monitoring right after TTS is ready
+    _voiceAlert = VoiceAlertManager(tts: _tts);
     _monitor = SystemMonitorService(_tts);
-    // BUG-23 FIX: catch errors from monitor.start() — battery_plus or
-    // connectivity_plus can throw on some devices/Android versions.
     unawaited(_monitor!.start().catchError(
         (e) => debugPrint('SystemMonitor start error: $e')));
-    await Future.wait([
-      _detector.loadModel(),
-      _initCamera(),
-      _detector.refreshSensitivity(),
-      SharedPreferences.getInstance().then((prefs) {
-        _vibrationEnabled = prefs.getBool('vibration') ?? true;
-      }),
-      FaceRecognitionService.instance.init(),
-      // NOTE: STT is intentionally NOT initialised here.
-      // On Samsung devices (Android 10) calling SpeechToText.initialize() at
-      // startup triggers Samsung's speech service to do a background warm-up
-      // that fires rapid listening→done cycles every 200 ms even without any
-      // explicit listen() call.  We defer STT init until the user actually
-      // double-taps to activate voice input (lazy init in VoiceCommandService).
-    ]);
+    final prefs = await SharedPreferences.getInstance();
+    _vibrationEnabled = prefs.getBool('vibration') ?? true;
 
     if (mounted) {
       setState(() {
-        _modelReady = _detector.isLoaded;
-        _statusText = _modelReady
-            ? 'Tap camera to start detecting'
-            : 'Model load failed — check assets';
+        _statusText = 'வழிகாட்டுதல் தயாராகிறது...';
       });
     }
 
-    if (_modelReady && mounted) {
-      await _tts.speak('NavEye ready. Starting detection automatically.');
-      await _startDetectionSilent();
-    }
+    // Initialize Calm Startup Flow: starts Sahara BGM at volume 0.20 and starts 15-second auto-timer
+    await _startupFlowManager.initialize();
   }
 
   Future<void> _initCamera() async {
@@ -212,8 +296,7 @@ class _MainAIScreenState extends State<MainAIScreen>
       final camStatus0 = await Permission.camera.status;
       if (!camStatus0.isGranted) {
         await _tts.speak(
-          'NavEye needs camera access. '
-          'Please tap Allow when the permission dialog appears.');
+          'கேமரா அனுமதி தேவை. அனுமதி பொத்தானை அழுத்தவும்.');
         await Future.delayed(const Duration(milliseconds: 900));
       }
       // ── Request camera permission before anything else ────────────────────
@@ -223,11 +306,10 @@ class _MainAIScreenState extends State<MainAIScreen>
         if (mounted) {
           setState(() {
             _cameraPermDenied = true;
-            _statusText = 'Camera permission required';
+            _statusText = 'கேமரா அனுமதி தேவை';
           });
           await _tts.speakNow(
-            'Camera permission denied. '
-            'Please open App Settings and allow camera access for NavEye.');
+            'கேமரா அனுமதி மறுக்கப்பட்டது. அமைப்புகளில் கேமரா அனுமதியை இயக்கவும்.');
         }
         return;
       }
@@ -286,39 +368,42 @@ class _MainAIScreenState extends State<MainAIScreen>
     HapticFeedback.mediumImpact();
 
     if (_isDetecting) {
-      // — STOP —
+      // — STOP (Section 16: வழிகாட்டுதல் நிறுத்தப்பட்டது.) —
       setState(() {
         _isDetecting = false;
-        _statusText  = 'Tap camera to start detecting';
+        _statusText  = 'வழிகாட்டுதல் தொடங்க தட்டவும்';
         _detLabel    = '';
         _distance    = '';
         _distanceM   = 100.0;
         _topResult   = null;
+        _currentNavState = NavigationState.clear;
+        _currentNavAction = NavigationAction.clear;
       });
-      _cachedName          = null;
+      _stabilizer.reset();
+      _decisionEngine.reset();
+      _voiceAlert.reset();
       _lastFrame           = null;
       _lastAnnouncement    = '';
-      _lastAnnouncedDist   = 100.0;
-      _pathClearAnnounced  = false;
-      _lastResultTime      = DateTime.now();
-      _pendingAnnouncement = null;          // discard any queued speech
-      _labelLastAnnounced.clear();
       _detector.resetConfirmation(); // clear confirmation counters on stop
       await _stopStream(); // stop stream to eliminate idle GC frame-buffer churn
       await NavEyeForegroundService.stop();
       if (mounted) setState(() => _serviceActive = false);
-      await _tts.speakNow('Detection stopped.');
+      await _voiceAlert.speakStop();
     } else {
-      // — START —
-      _pendingAnnouncement = null; // discard stale queued speech from last session
+      // — START (Section 16: வழிகாட்டுதல் தொடங்கப்பட்டது. முன்னால் செல்லலாம்.) —
+      _stabilizer.reset();
+      _decisionEngine.reset();
+      _voiceAlert.reset();
       setState(() {
         _isDetecting = true;
-        _statusText  = 'Detecting obstacles...';
+        _statusText  = 'வழிகாட்டுதல் செயலில் உள்ளது';
         _detLabel    = '';
+        _currentNavState = NavigationState.clear;
+        _currentNavAction = NavigationAction.clear;
       });
       await NavEyeForegroundService.start();
       if (mounted) setState(() => _serviceActive = true);
-      await _tts.speakNow('Detection started.');
+      await _voiceAlert.speakStartup();
       await _startStream();
     }
   }
@@ -349,17 +434,17 @@ class _MainAIScreenState extends State<MainAIScreen>
   // Fix 5: start detection without playing TTS (used for auto-start on launch)
   Future<void> _startDetectionSilent() async {
     if (!_cameraReady || !_modelReady || _cam == null || _isDetecting) return;
-    _pendingAnnouncement = null; // discard any stale queued speech
     if (mounted) {
       setState(() {
         _isDetecting = true;
-        _statusText  = 'Detecting obstacles...';
+        _statusText  = 'வழிகாட்டுதல் செயலில் உள்ளது';
         _detLabel    = '';
+        _currentNavState = NavigationState.clear;
+        _currentNavAction = NavigationAction.clear;
       });
     }
     await NavEyeForegroundService.start();
     if (mounted) setState(() => _serviceActive = true);
-    _lastResultTime = DateTime.now();
     // Stream was started during _initCamera (single-configure optimisation).
     // If for any reason it isn't running yet, start it now.
     if (!_isStreaming) await _startStream();
@@ -370,18 +455,12 @@ class _MainAIScreenState extends State<MainAIScreen>
     if (!_isDetecting || !_modelReady) return;
     if (_busy) return;
     final now = DateTime.now();
-    if (now.difference(_lastDetection).inMilliseconds < 1000) return;
+    // Allow frames to stream at ~5 FPS (every 200 ms) so temporal stabilizer works smoothly
+    if (now.difference(_lastDetection).inMilliseconds < 200) return;
     _lastDetection = now;
     _busy = true;
 
     try {
-      // ── Drain pending announcement when TTS just finished ─────────────────
-      if (_pendingAnnouncement != null && !_tts.isSpeaking) {
-        final msg = _pendingAnnouncement!;
-        _pendingAnnouncement = null;
-        await _tts.announce(msg);
-      }
-
       // YUV conversion off the UI thread
       final raw = await compute(_yuvToRgb, {
         'y': Uint8List.fromList(frame.planes[0].bytes),
@@ -401,9 +480,9 @@ class _MainAIScreenState extends State<MainAIScreen>
         format: img.Format.uint8,
         numChannels: 3,
       );
-      _lastFrame   = image;
+      _lastFrame = image;
 
-      // Fix 11: low-light check (sample centre pixels)
+      // Low-light check (sample centre pixels)
       if (now.difference(_lastDarkCheck).inSeconds >= 5) {
         _lastDarkCheck = now;
         final cx = image.width ~/ 2, cy = image.height ~/ 2;
@@ -418,234 +497,145 @@ class _MainAIScreenState extends State<MainAIScreen>
         }
         final avg = cnt > 0 ? brightness ~/ cnt : 255;
         if (avg < 38) {
-          if (!_darkWarned) {
-            _darkWarned = true;
-            await _tts.announce(
-                'Warning: too dark for reliable detection. '
-                'Please move to a brighter area.');
+          if (!_torchActive) {
+            _torchActive = true;
+            try {
+              await _cam?.setFlashMode(FlashMode.torch);
+              await _voiceAlert.speakDirective(
+                  'வெளிச்சம் குறைவாக உள்ளது. டார்ச் ஆன் செய்யப்பட்டது.');
+            } catch (e) {
+              debugPrint('Auto-torch error: $e');
+            }
           }
-          return; // skip detection in darkness
-        } else {
-          _darkWarned = false;
+        } else if (avg >= 60 && _torchActive) {
+          _torchActive = false;
+          try {
+            await _cam?.setFlashMode(FlashMode.off);
+            await _voiceAlert.speakDirective(
+                'வெளிச்சம் போதுமானது. டார்ச் அணைக்கப்பட்டது.');
+          } catch (e) {
+            debugPrint('Auto-torch off error: $e');
+          }
         }
       }
 
       final results = await _detector.detect(image);
       if (!mounted) return;
 
-      // ── Nothing detected ─────────────────────────────────────────────────
-      if (results.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _detLabel   = ''; _direction = 'CENTRE';
-            _distance   = ''; _distanceM = 100.0;
-            _topResult  = null;
-          });
+      // ── Object Finder Mode Evaluation ───────────────────────────────────────
+      if (_finderModeActive) {
+        final feedback = ObjectFinderService.instance.evaluateDetections(results, now);
+        if (feedback != null) {
+          await _voiceAlert.speakDirective(feedback.spokenTextTa);
+          if (feedback.isReachable) {
+            HapticFeedback.heavyImpact();
+          } else {
+            HapticFeedback.mediumImpact();
+          }
         }
-        // Announce clear path after 5 s of no detections (faster feedback)
-        if (!_pathClearAnnounced &&
-            now.difference(_lastResultTime).inSeconds >= 5) {
-          _pathClearAnnounced = true;
-          _labelLastAnnounced.clear(); // reset so next object announces immediately
-          await _tts.announce('Path ahead is clear.');
+      }
+
+      // ── Step 1: Temporal Detection Stabilizer ─────────────────────────────
+      final stabilizedObjects = _stabilizer.processFrame(results, timestamp: now);
+
+      // ── Continuous Clear-Path Guidance & Heartbeat (Sections 2 & 13) ────────
+      if (results.isEmpty || stabilizedObjects.isEmpty) {
+        final clearAlert = _decisionEngine.evaluate([], timestamp: now);
+        if (clearAlert != null) {
+          if (mounted) {
+            setState(() {
+              _detLabel   = 'முன்னால் பாதை தெளிவாக உள்ளது';
+              _direction  = 'முன்னால்';
+              _distance   = 'தெளிவு';
+              _distanceM  = 100.0;
+              _topResult  = null;
+              _currentNavState = NavigationState.clear;
+              _currentNavAction = NavigationAction.clear;
+            });
+          }
+          await _voiceAlert.processAlert(clearAlert, timestamp: now);
+          _lastAnnouncement = clearAlert.spokenTextTa;
           if (_serviceActive) unawaited(NavEyeForegroundService.clearDetection());
         }
         return;
       }
 
-      _lastResultTime     = now;
-      _pathClearAnnounced = false;
-
-      // ── Direction → natural phrase ────────────────────────────────────────
-      String naturalDir(String d) =>
-          d == 'left' ? 'to your left' : d == 'right' ? 'to your right' : 'in front of you';
-
-      // Navigation hint based on object position and distance
-      String navHint(String d, double dist, bool isWall) {
-        if (isWall || dist > 5.0) return '';
-        if (dist < 0.8)   return ' Stop!';
-        if (d == 'left')  return ' Move right to pass.';
-        if (d == 'right') return ' Move left to pass.';
-        return ' Slow down.';
-      }
-
-      // ── Pick most-centred object (wall/obstacle always wins) ─────────────
-      final top = results.firstWhere(
-        (r) => r.isWallHeuristic,
-        orElse: () => results.reduce(
-          (a, b) => (a.xCenter-0.5).abs() <= (b.xCenter-0.5).abs() ? a : b,
-        ),
-      );
-
-      String label        = top.label;
-      String announcement = top.announcement;
-
-      // ── Confirmation gate — skip unconfirmed detections (reduces false alerts)
-      // Exceptions: always announce person, vehicles, or anything very close on first frame.
-      if (!top.confirmed &&
-          top.rawLabel != 'person' &&
-          !top.isVehicle &&
-          !top.isVeryClose) { return; }
-
-      // ── Person — crop bounding box → face recognition ─────────────────────
-      if (top.rawLabel == 'person') {
-        if (_cachedName != null && now.isBefore(_cacheExpiry)) {
-          label        = _cachedName!;
-          announcement = 'That is $_cachedName, ${naturalDir(top.direction)}, '
-              '${top.distanceSpoken}';
-        } else if (now.difference(_lastFaceCheck).inMilliseconds >= 1500) {
-          _lastFaceCheck = now;
-          // Pass the FULL camera frame + YOLO person bounding box (normalised).
-          // ML Kit detects faces at full resolution — much more accurate than
-          // passing a pre-cropped region, which caused the wrong face (or no
-          // face) to be selected when the crop was too small or misaligned.
-          final match = await FaceRecognitionService.instance
-              .recogniseInFrame(
-                image,
-                pxMin: top.xMin, pyMin: top.yMin,
-                pxMax: top.xMax, pyMax: top.yMax,
-              );
-          if (match != null) {
-            _cachedName  = match.name;
-            _cacheExpiry = now.add(const Duration(seconds: 12));
-            label        = match.name;
-            announcement = 'That is ${match.name}, ${naturalDir(top.direction)}, '
-                '${top.distanceSpoken}';
+      // ── Step 2: Face recognition enhancement for stabilized persons ───────
+      final processedObjects = <StabilizedObject>[];
+      for (final obj in stabilizedObjects) {
+        if (obj.rawLabel == 'person') {
+          final match = await FaceRecognitionService.instance.recogniseInFrame(
+            image,
+            pxMin: obj.xMin, pyMin: obj.yMin,
+            pxMax: obj.xMax, pyMax: obj.yMax,
+          );
+          if (match != null && match.isConfirmed) {
+            processedObjects.add(obj.copyWith(
+              rawLabel: 'person_${match.name}',
+              label: match.name,
+              xCenter: match.faceCenterXRatio,
+            ));
           } else {
-            _cachedName  = null;
-            // FIX-D: Always announce "unknown person" so blind user knows someone
-            // is there even when not recognised. Previously only said "not recognised"
-            // when very close — now says it at any distance so no one is silently ignored.
-            label        = 'Person';
-            announcement = 'Unknown person ${naturalDir(top.direction)}, ${top.distanceSpoken}';
+            // Unconfirmed or unknown person
+            processedObjects.add(obj);
           }
         } else {
-          if (_cachedName != null) {
-            label        = _cachedName!;
-            announcement = 'That is $_cachedName, ${naturalDir(top.direction)}, '
-                '${top.distanceSpoken}';
-          } else {
-            label        = 'Person';
-            announcement = 'Unknown person ${naturalDir(top.direction)}, ${top.distanceSpoken}';
-          }
+          processedObjects.add(obj);
         }
-      } else if (top.isVehicle) {
-        // Vehicles — richer directional warning, no face check
-        _cachedName  = null;
-        if (top.distanceM < 2.0) {
-          announcement = 'Warning! ${top.label} ${naturalDir(top.direction)}, '
-              '${top.distanceSpoken} — stop!';
-        } else if (top.distanceM < 4.0) {
-          announcement = 'Caution — ${top.label} ${naturalDir(top.direction)}, '
-              '${top.distanceSpoken}. Be careful.';
-        } else {
-          announcement = '${top.label} ${naturalDir(top.direction)}, ${top.distanceSpoken}';
-        }
-      } else {
-        _cachedName  = null;
-        announcement += navHint(top.direction, top.distanceM, top.isWallHeuristic);
       }
 
-      // Secondary danger — any very-close object that isn't the primary result
-      final DetectionResult? danger = results.cast<DetectionResult?>().firstWhere(
-        (r) => r != top && r!.distanceM < 1.0 && !r.isWallHeuristic,
-        orElse: () => null,
-      );
-      final secondaryAlert = danger != null
-          ? ' Also — warning, ${danger.label} ${naturalDir(danger.direction)}, '
-            '${danger.distanceSpoken}!'
-          : '';
+      // ── Step 3: Navigation Decision Engine (Spatial reasoning & priority) ─
+      final navAlert = _decisionEngine.evaluate(processedObjects, timestamp: now);
+
+      // Find best matching DetectionResult for bounding box painting
+      DetectionResult? topMatch;
+      if (navAlert != null) {
+        for (final r in results) {
+          if (r.rawLabel == navAlert.rawLabel || (navAlert.rawLabel.startsWith('person_') && r.rawLabel == 'person')) {
+            topMatch = r;
+            break;
+          }
+        }
+      }
+      topMatch ??= results.isNotEmpty ? results.first : null;
 
       if (mounted) {
         setState(() {
-          _detLabel  = label;
-          _direction = top.direction.toUpperCase();
-          _distance  = top.distance;
-          _distanceM = top.distanceM;
-          _topResult = top; // drives the bounding box painter
+          if (navAlert != null) {
+            _detLabel  = navAlert.label;
+            _direction = navAlert.direction.displayName;
+            _distance  = navAlert.proximity.displayName;
+            _distanceM = navAlert.distanceM;
+            _topResult = topMatch;
+            _currentNavState = navAlert.navState;
+            _currentNavAction = navAlert.action;
+          }
         });
       }
-      // Update persistent notification text so lock-screen shows current obstacle
-      if (_serviceActive) {
-        unawaited(NavEyeForegroundService.update(
-          label: label, distance: top.distance));
-      }
 
-      // Haptic patterns by object type and distance
-      if (_vibrationEnabled && await Vibration.hasVibrator() == true) {
-        if (top.isVehicle && top.distanceM < 4.0) {
-          // Aggressive long-short-long — vehicle hazard
-          Vibration.vibrate(pattern: [0, 300, 100, 150, 100, 300]);
-        } else if (top.rawLabel == 'person') {
-          // Two short pulses — person detected
-          Vibration.vibrate(pattern: [0, 80, 120, 80]);
-        } else if (top.distanceM < 0.6) {
-          // Rapid triple pulse — immediate danger
-          Vibration.vibrate(pattern: [0, 200, 80, 200, 80, 200]);
-        } else if (top.isVeryClose) {
-          // Single long pulse — very close obstacle
-          Vibration.vibrate(duration: 500);
-        } else {
-          // Short tap — normal detection
-          Vibration.vibrate(duration: 80);
+      // ── Step 4: Centralized Voice Alert Manager (Cooldown & Priority Queue)
+      await _voiceAlert.processAlert(navAlert, timestamp: now);
+
+      if (navAlert != null) {
+        _lastAnnouncement = navAlert.spokenTextTa;
+        if (_serviceActive) {
+          unawaited(NavEyeForegroundService.update(
+            label: _detLabel,
+            distance: navAlert.proximity.displayName,
+          ));
         }
-      }
 
-      // ── Cooldown gate — prevents non-stop TTS ────────────────────────────
-      //
-      // Per-label cooldowns (adaptive to distance):
-      //   < 0.8 m (immediate danger) : 4 s minimum per label
-      //   < 1.2 m (danger proximity) : 7 s minimum per label
-      //   normal                     : 9 s minimum per label (global default)
-      //
-      // Global minimum: 3 s between ANY two TTS calls.
-      //
-      // ⚠ Bug fixed: previously `immediateDanger` bypassed ALL cooldowns,
-      //   causing non-stop TTS every detection frame when an object was closer
-      //   than 0.8 m. Now even immediate danger respects a per-label minimum.
-      //
-      // ⚠ Bug fixed: `warnThreshold` oscillated at the 1.2 m boundary
-      //   (object at 1.18 m → 1.23 m → 1.18 m... triggered every cycle).
-      //   Fixed by using 1.5 m hysteresis: must retreat ABOVE 1.5 m before
-      //   the "entered danger zone" alert can re-fire for the same label.
-      final lastForLabel   = _labelLastAnnounced[label]
-          ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final sinceThisLabel = now.difference(lastForLabel).inMilliseconds;
-      final sinceGlobal    = now.difference(_lastAnnouncedAt).inMilliseconds;
-
-      // Immediate danger — object < 0.8 m
-      final immediateDanger = top.distanceM < 0.8;
-
-      // Adaptive per-label cooldown (generous enough to stop spam)
-      final effectivePerLabel = immediateDanger    ? 4000   // 4 s even for very close
-                              : top.distanceM < 1.2 ? 7000  // 7 s in danger zone
-                              : _perLabelCooldownMs;         // 9 s normally
-
-      // Newly entered danger zone — use 1.5 m hysteresis to stop oscillation.
-      // The object must have been ABOVE 1.5 m (not just 1.2 m) before the
-      // "entered danger zone" announcement can fire again for this label.
-      final warnThreshold = _lastAnnouncedDist >= 1.5 && top.distanceM < 1.2;
-
-      // Master gate — at least one condition must be true AND global minimum met
-      final doAnnounce = sinceGlobal >= _globalCooldownMs &&
-          (warnThreshold || sinceThisLabel >= effectivePerLabel);
-
-      if (doAnnounce) {
-        final full = announcement + secondaryAlert;
-        _labelLastAnnounced[label] = now;
-        _lastAnnouncedAt           = now;
-        _lastAnnouncement          = full;
-        _lastAnnouncedDist         = top.distanceM;
-
-        if (immediateDanger) {
-          // Danger interrupts whatever is playing
-          _pendingAnnouncement = null;
-          await _tts.announce(full);
-        } else if (!_tts.isSpeaking) {
-          await _tts.announce(full);
-        } else {
-          // TTS busy — queue single pending slot (latest wins)
-          _pendingAnnouncement = full;
+        // Haptic feedback
+        if (_vibrationEnabled && await Vibration.hasVibrator() == true) {
+          if (navAlert.priority == AlertPriority.criticalObstacle) {
+            Vibration.vibrate(pattern: [0, 250, 100, 250, 100, 250]);
+          } else if (navAlert.rawLabel == 'person') {
+            Vibration.vibrate(pattern: [0, 80, 120, 80]);
+          } else if (navAlert.distanceM < 1.2) {
+            Vibration.vibrate(pattern: [0, 150, 80, 150]);
+          } else {
+            Vibration.vibrate(duration: 80);
+          }
         }
       }
     } catch (e) {
@@ -673,7 +663,7 @@ class _MainAIScreenState extends State<MainAIScreen>
     // Tap again while active → cancel (toggle off)
     if (_voiceActive) {
       _resetVoiceState();
-      await _tts.speakNow('Cancelled.');
+      await _tts.speakNow('ரத்து செய்யப்பட்டது.');
       return;
     }
 
@@ -682,14 +672,7 @@ class _MainAIScreenState extends State<MainAIScreen>
     setState(() => _voiceActive = true);
 
     // ── Audio confirmation ────────────────────────────────────────────────────
-    // Tell the blind user the mic is now open BEFORE muting detection TTS.
-    // speakNow ignores mute so it always fires.
-    // FIX-3: richer prompt so user knows exactly what to say.
-    await _tts.speakNow('Listening — say start, stop, or help');
-    // FIX-1: gap raised 700ms → 1300ms.
-    // "Listening — say start, stop, or help" takes ~1.1 s to speak at medium
-    // rate. At 700 ms the mic opened while TTS was still talking → error_audio
-    // → STT died instantly → "Sorry, not heard" every time.
+    await _tts.speakNow('கேட்கிறது — தொடங்கு, நிறுத்து, அல்லது உதவி எனச் சொல்லுங்கள்');
     await Future.delayed(const Duration(milliseconds: 1300));
 
     _tts.mute(); // mute obstacle TTS while mic is active
@@ -698,7 +681,7 @@ class _MainAIScreenState extends State<MainAIScreen>
     _voiceTimeout?.cancel();
     _voiceTimeout = Timer(const Duration(seconds: 12), () {
       _resetVoiceState();
-      _tts.speakNow('No command heard.');
+      _tts.speakNow('கட்டளை எதுவும் கேட்கவில்லை.');
     });
 
     if (!_voiceActive) return; // was cancelled during the delay
@@ -707,9 +690,9 @@ class _MainAIScreenState extends State<MainAIScreen>
       _resetVoiceState();
       // Audio feedback on result
       if (cmd != VoiceCommand.unknown) {
-        await _tts.speakNow('Got it.');
+        await _tts.speakNow('புரிந்தது.');
       } else {
-        await _tts.speakNow('Sorry, not heard. Try again.');
+        await _tts.speakNow('மன்னிக்கவும், சரியாகக் கேட்கவில்லை. மீண்டும் சொல்லவும்.');
       }
       await _handleCmd(cmd);
     });
@@ -721,16 +704,19 @@ class _MainAIScreenState extends State<MainAIScreen>
         if (!_isDetecting) await _toggleDetection();
         break;
       case VoiceCommand.stop:
+        if (_finderModeActive) {
+          _finderModeActive = false;
+          ObjectFinderService.instance.cancel();
+          await _tts.speakNow('பொருள் தேடுதல் நிறுத்தப்பட்டது.');
+        }
         if (_isDetecting) await _toggleDetection();
         break;
       case VoiceCommand.repeat:
         await _tts.speakNow(
-          _lastAnnouncement.isNotEmpty ? _lastAnnouncement : 'Nothing to repeat.');
+          _lastAnnouncement.isNotEmpty ? _lastAnnouncement : 'மீண்டும் சொல்ல எதுவும் இல்லை.');
         break;
       case VoiceCommand.whoIsThis:
-        await _tts.speakNow('Checking who is in front of you.');
-        _cachedName    = null;
-        _lastFaceCheck = DateTime.fromMillisecondsSinceEpoch(0);
+        await _tts.speakNow('முன்னால் யார் இருக்கிறார் என்று பார்க்கிறேன்.');
 
         img.Image? checkFrame = _lastFrame;
 
@@ -750,19 +736,132 @@ class _MainAIScreenState extends State<MainAIScreen>
           final match = await FaceRecognitionService.instance
               .recogniseInFrame(checkFrame);
           if (match != null) {
-            _cachedName  = match.name;
-            _cacheExpiry = DateTime.now().add(const Duration(seconds: 15));
-            await _tts.speakNow('That is ${match.name}.');
+            final nameTa = match.name.toLowerCase() == 'loki' ? 'லோகி' : match.name;
+            await _tts.speakNow('அவர் $nameTa.');
           } else {
             await _tts.speakNow(
-                'No known face detected. This person is unknown.');
+                'தெரிந்த முகம் எதுவும் இல்லை. இவர் அறியப்படாத நபர்.');
           }
         } else {
-          await _tts.speakNow('Could not capture an image. Please try again.');
+          await _tts.speakNow('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
         }
         break;
+      case VoiceCommand.emergencySOS:
+        await _tts.speakNow('அவசர உதவி செயல்படுத்தப்படுகிறது.');
+        final payload = await EmergencySosService.instance.triggerSos();
+        if (payload.emergencyContact.isNotEmpty) {
+          await _tts.speakNow('அவசர செய்தி மற்றும் இருப்பிடம் அனுப்பப்படுகிறது.');
+        } else {
+          await _tts.speakNow('அவசர தொடர்பு எண் பதிவு செய்யப்படவில்லை. இருப்பிடம் சேமிக்கப்பட்டது.');
+        }
+        break;
+      case VoiceCommand.identifyCurrency:
+        await _tts.speakNow('ரூபாய் நோட்டை சரிபார்க்கிறேன்.');
+        img.Image? currFrame = _lastFrame;
+        if (currFrame == null && _cam != null && _cameraReady && !_isStreaming) {
+          try {
+            final xFile = await _cam!.takePicture();
+            final bytes = await File(xFile.path).readAsBytes();
+            currFrame = img.decodeImage(bytes);
+            await File(xFile.path).delete();
+          } catch (e) {
+            debugPrint('Currency capture error: $e');
+          }
+        }
+        if (currFrame != null) {
+          String? ocrText;
+          try {
+            final tmpPath = '${Directory.systemTemp.path}/curr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
+            final encoded = img.encodeJpg(currFrame, quality: 85);
+            final tmpFile = File(tmpPath);
+            await tmpFile.writeAsBytes(encoded);
+            final ocrRes = await OcrService.instance.processImageFile(tmpPath);
+            if (ocrRes.hasText) {
+              ocrText = ocrRes.rawText;
+            }
+            if (await tmpFile.exists()) {
+              await tmpFile.delete();
+            }
+          } catch (e) {
+            debugPrint('Currency OCR helper error: $e');
+          }
+
+          final currResult = CurrencyRecognitionService.instance.recognize(
+            image: currFrame,
+            ocrText: ocrText,
+          );
+          await _tts.speakNow(currResult.spokenTextTa);
+        } else {
+          await _tts.speakNow('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+        }
+        break;
+      case VoiceCommand.readText:
+        await _tts.speakNow('வாசகம் படிக்கப்படுகிறது.');
+        String? ocrPath;
+        if (_cam != null && _cameraReady) {
+          try {
+            final xFile = await _cam!.takePicture();
+            ocrPath = xFile.path;
+          } catch (e) {
+            debugPrint('OCR capture error: $e');
+          }
+        }
+        if (ocrPath == null && _lastFrame != null) {
+          try {
+            ocrPath = '${Directory.systemTemp.path}/ocr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
+            final encoded = img.encodeJpg(_lastFrame!, quality: 90);
+            await File(ocrPath).writeAsBytes(encoded);
+          } catch (e) {
+            debugPrint('OCR fallback encode error: $e');
+          }
+        }
+        if (ocrPath != null) {
+          final ocrResult = await OcrService.instance.processImageFile(ocrPath);
+          try {
+            final f = File(ocrPath);
+            if (await f.exists()) await f.delete();
+          } catch (_) {}
+          await _tts.speakNow(ocrResult.spokenTextTa);
+        } else {
+          await _tts.speakNow('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+        }
+        break;
+      case VoiceCommand.findObject:
+        final query = _voice.lastQuery;
+        final target = ObjectFinderService.instance.setTargetFromQuery(query);
+        _finderModeActive = true;
+        if (!_isDetecting) {
+          await _toggleDetection();
+        }
+        final targetTa = ObjectFinderService.instance.getTamilName(target ?? query);
+        await _tts.speakNow('$targetTa தேடும் முறை இயக்கப்பட்டது. கேமராவை மெதுவாக சுழற்றவும்.');
+        break;
+      case VoiceCommand.toggleTorch:
+        if (_cam != null && _cameraReady) {
+          try {
+            _torchActive = !_torchActive;
+            await _cam!.setFlashMode(_torchActive ? FlashMode.torch : FlashMode.off);
+            await _tts.speakNow(_torchActive ? 'டார்ச் ஆன் செய்யப்பட்டது.' : 'டார்ச் அணைக்கப்பட்டது.');
+          } catch (e) {
+            debugPrint('Torch toggle error: $e');
+            await _tts.speakNow('டார்ச் இயக்க முடியவில்லை.');
+          }
+        } else {
+          await _tts.speakNow('கேமரா தயாராகவில்லை.');
+        }
+        break;
+      case VoiceCommand.fasterSpeed:
+        final newMultiplier = (_tts.speechRateMultiplier + 0.25).clamp(1.0, 2.0);
+        await _tts.setSpeechRateMultiplier(newMultiplier);
+        await _tts.speakNow('குரல் வேகம் அதிகரிக்கப்பட்டது.');
+        break;
+      case VoiceCommand.slowerSpeed:
+        final newMultiplier = (_tts.speechRateMultiplier - 0.25).clamp(1.0, 2.0);
+        await _tts.setSpeechRateMultiplier(newMultiplier);
+        await _tts.speakNow('குரல் வேகம் குறைக்கப்பட்டது.');
+        break;
       case VoiceCommand.openSettings:
-        await _tts.speakNow('Opening settings.');
+        await _tts.speakNow('அமைப்புகள் திறக்கப்படுகிறது.');
         if (mounted) {
           await Navigator.pushNamed(context, AppRoutes.settings);
           await _detector.refreshSensitivity();
@@ -776,10 +875,29 @@ class _MainAIScreenState extends State<MainAIScreen>
         break;
       case VoiceCommand.help:
         await _tts.speakNow(
-          'Available commands: Start, Stop, Repeat, Who is this, People, Settings, Help.');
+          'பயன்படுத்தக்கூடிய கட்டளைகள்: தொடங்கு, நிறுத்து, ரூபாய் நோட்டு, வாசகம் படி, எங்கே இருக்கிறது, அவசரம், டார்ச், வேகமாக பேசு, மெதுவாக பேசு, யார் இது, நபர்கள், அமைப்புகள், உதவி.');
+        break;
+      case VoiceCommand.whereAmI:
+        await _tts.speakNow('உங்கள் இருப்பிடத்தைச் சரிபார்க்கிறது.');
+        break;
+      case VoiceCommand.detectObjects:
+        if (!_isDetecting) await _toggleDetection();
+        break;
+      case VoiceCommand.switchCamera:
+        await _tts.speakNow('கேமரா மாற்றப்படுகிறது.');
+        break;
+      case VoiceCommand.changeLanguage:
+        await _tts.speakNow('மொழி மாற்றப்பட்டது.');
+        break;
+      case VoiceCommand.addPerson:
+        _showPeopleMenu();
+        break;
+      case VoiceCommand.cancel:
+      case VoiceCommand.goBack:
+        await _tts.speakNow('ரத்து செய்யப்பட்டது.');
         break;
       case VoiceCommand.unknown:
-        await _tts.speakNow('Command not recognised. Say Help for a list of commands.');
+        await _tts.speakNow('கட்டளை புரியவில்லை. உதவி எனக் கூறவும்.');
         break;
     }
   }
@@ -800,20 +918,21 @@ class _MainAIScreenState extends State<MainAIScreen>
                     color: AppColors.greyDark,
                     borderRadius: BorderRadius.circular(2))),
             const SizedBox(height: 16),
-            const Text('People',
-                style: TextStyle(color: AppColors.white, fontSize: 17,
+            const Text('நபர்கள்',
+                style: TextStyle(color: Colors.white, fontSize: 17,
                     fontWeight: FontWeight.w700)),
             const SizedBox(height: 18),
             _MenuTile(
-              icon: Icons.person_add_alt_1, label: 'Add New Person',
-              sub: 'Capture a face to recognise later',
-              color: AppColors.yellow,
+              icon: Icons.person_add_alt_1, label: 'புதிய நபரைச் சேர்க்கவும்',
+              sub: 'முகத்தை ஸ்கேன் செய்து பதிவு செய்யவும்',
+              color: Colors.white,
               onTap: () async {
                 Navigator.pop(context);
                 // Stop the back-camera stream before the capture screen opens
                 // its front camera — prevents dual-camera contention on
                 // Samsung devices which causes freezing or slow init.
                 await _stopStream();           // BUG-22 FIX: use helper consistently
+                if (!mounted) return;
                 await Navigator.pushNamed(context, AppRoutes.peopleCapture);
                 await FaceRecognitionService.instance.refreshKnownPeople();
                 // Restart the stream now that capture is done.
@@ -824,9 +943,9 @@ class _MainAIScreenState extends State<MainAIScreen>
             ),
             const SizedBox(height: 10),
             _MenuTile(
-              icon: Icons.people_alt_outlined, label: 'View / Manage People',
-              sub: 'See and delete saved faces',
-              color: AppColors.green,
+              icon: Icons.people_alt_outlined, label: 'நபர்களைப் பார்க்கவும் / நிர்வகிக்கவும்',
+              sub: 'பதிவு செய்யப்பட்ட முகங்களை நிர்வகிக்க',
+              color: Colors.white,
               onTap: () async {
                 Navigator.pop(context);
                 await Navigator.pushNamed(context, AppRoutes.peopleList);
@@ -844,6 +963,12 @@ class _MainAIScreenState extends State<MainAIScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      _startupFlowManager.onAppPaused();
+    } else if (state == AppLifecycleState.resumed) {
+      _startupFlowManager.onAppResumed();
+    }
+
     if (state == AppLifecycleState.paused) {
       _wasPausedByLifecycle = true;
       // ── If the foreground service is running, keep camera alive ─────────────
@@ -883,6 +1008,7 @@ class _MainAIScreenState extends State<MainAIScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _startupFlowManager.dispose();
     _voiceTimeout?.cancel();
     _pulse.dispose();
     _monitor?.dispose();
@@ -893,6 +1019,7 @@ class _MainAIScreenState extends State<MainAIScreen>
     }
     _cam?.dispose();
     _detector.dispose();
+    _voiceAlert.stop();
     _tts.dispose();
     _voice.dispose();
     // Do NOT call FaceRecognitionService.instance.dispose() here.
@@ -903,42 +1030,38 @@ class _MainAIScreenState extends State<MainAIScreen>
     super.dispose();
   }
 
-  // ── Colour helpers ────────────────────────────────────────────────────────
-  Color get _distColor {
-    if (_distanceM < 1.2) return const Color(0xFFEF5350);
-    if (_distanceM < 3.0) return const Color(0xFFFF9800);
-    return AppColors.green;
-  }
-
+  // ── Colour helpers (Strict Black and White) ──────────────────────────────
   Color get _borderColor {
     if (!_isDetecting) return AppColors.greyDark;
-    if (_detLabel.isNotEmpty && _distanceM < 1.2) return const Color(0xFFEF5350);
-    return AppColors.green;
+    return Colors.white;
   }
 
   // ── UI ────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: Column(children: [
+      body: Stack(
+        children: [
+          SafeArea(
+            child: Column(children: [
 
-          // Status bar
+          // Status bar (Section 18 & 19: வழிகாட்டுதல் செயலில் உள்ளது)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: AppColors.surface,
+                color: Colors.black,
+                border: Border.all(color: Colors.white, width: 1.5),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Row(children: [
                 Icon(
                   _isDetecting ? Icons.radar : Icons.search_outlined,
-                  color: _isDetecting ? AppColors.green : AppColors.grey, size: 17),
+                  color: _isDetecting ? Colors.white : AppColors.grey, size: 17),
                 const SizedBox(width: 8),
                 Expanded(child: Text(_statusText,
-                    style: const TextStyle(color: AppColors.greyLight, fontSize: 13))),
+                    style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700))),
                 if (_isDetecting)
                   AnimatedBuilder(
                     animation: _pulseAnim,
@@ -946,11 +1069,55 @@ class _MainAIScreenState extends State<MainAIScreen>
                       opacity: _pulseAnim.value,
                       child: Container(width: 8, height: 8,
                           decoration: const BoxDecoration(
-                              color: AppColors.green, shape: BoxShape.circle)),
+                              color: Colors.white, shape: BoxShape.circle)),
                     ),
                   ),
+                const SizedBox(width: 8),
+                IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  icon: Icon(
+                    _debugModeEnabled ? Icons.bug_report : Icons.bug_report_outlined,
+                    color: _debugModeEnabled ? Colors.white : AppColors.grey,
+                    size: 20,
+                  ),
+                  tooltip: 'Developer Debug Mode',
+                  onPressed: () {
+                    setState(() {
+                      _debugModeEnabled = !_debugModeEnabled;
+                    });
+                  },
+                ),
               ]),
             ),
+          ),
+
+          // Tamil TTS availability diagnostic banner
+          ValueListenableBuilder<bool>(
+            valueListenable: _tts.isTamilAvailableNotifier,
+            builder: (context, available, _) {
+              if (available) return const SizedBox.shrink();
+              return Container(
+                width: double.infinity,
+                margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.black, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'எச்சரிக்கை: தமிழ் குரல் கிடைக்கவில்லை',
+                      style: TextStyle(color: Colors.black, fontSize: 13, fontWeight: FontWeight.w800),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
 
           // Camera area — full gesture control for blind users
@@ -962,6 +1129,7 @@ class _MainAIScreenState extends State<MainAIScreen>
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: GestureDetector(
+                onTapDown: (_) => _recordTapAndCheckSos(),
                 onTap: _toggleDetection,
                 onDoubleTap: () {
                   HapticFeedback.heavyImpact();
@@ -971,7 +1139,7 @@ class _MainAIScreenState extends State<MainAIScreen>
                   HapticFeedback.heavyImpact();
                   final msg = _lastAnnouncement.isNotEmpty
                       ? _lastAnnouncement
-                      : 'Nothing to repeat yet.';
+                      : 'மீண்டும் சொல்ல எதுவும் இல்லை.';
                   _tts.speakNow(msg);
                 },
                 onVerticalDragEnd: (details) {
@@ -990,8 +1158,8 @@ class _MainAIScreenState extends State<MainAIScreen>
                     border: Border.all(color: _borderColor, width: 2.0),
                     boxShadow: _isDetecting && _distanceM < 1.2
                         ? [BoxShadow(
-                            color: const Color(0xFFEF5350).withValues(alpha: 0.3),
-                            blurRadius: 12, spreadRadius: 2)]
+                            color: Colors.white.withValues(alpha: 0.35),
+                            blurRadius: 14, spreadRadius: 2)]
                         : null,
                   ),
                   child: ClipRRect(
@@ -1034,41 +1202,39 @@ class _MainAIScreenState extends State<MainAIScreen>
                                     Container(
                                       width: 80, height: 80,
                                       decoration: BoxDecoration(
-                                        color: AppColors.yellow.withValues(alpha: 0.15),
+                                        color: Colors.black,
                                         shape: BoxShape.circle,
-                                        border: Border.all(color: AppColors.yellow, width: 2),
+                                        border: Border.all(color: Colors.white, width: 2),
                                       ),
                                       child: const Icon(Icons.touch_app,
-                                          color: AppColors.yellow, size: 42),
+                                          color: Colors.white, size: 42),
                                     ),
                                     const SizedBox(height: 16),
-                                    const Text('Tap to Start Detection',
-                                        style: TextStyle(color: AppColors.white,
+                                    const Text('வழிகாட்டுதல் தொடங்க தட்டவும்',
+                                        style: TextStyle(color: Colors.white,
                                             fontSize: 20, fontWeight: FontWeight.w800)),
                                     const SizedBox(height: 8),
                                     Text(
-                                      _modelReady ? 'AI model ready' : 'Model not loaded',
-                                      style: TextStyle(
-                                        color: _modelReady ? AppColors.green : AppColors.danger,
+                                      _modelReady ? 'AI தயார்' : 'மாதிரி தயாராகவில்லை',
+                                      style: const TextStyle(
+                                        color: Colors.white,
                                         fontSize: 13,
                                       ),
                                     ),
                                     const SizedBox(height: 12),
                                     // Gesture hint cards
-                                    _GestureHint(icon: Icons.touch_app,   label: 'Tap',         hint: 'Start / Stop detection'),
+                                    _GestureHint(icon: Icons.touch_app,   label: 'தட்டவும்',         hint: 'தொடங்க / நிறுத்த'),
                                     const SizedBox(height: 4),
-                                    _GestureHint(icon: Icons.mic,          label: 'Double-tap',  hint: 'Voice command'),
+                                    _GestureHint(icon: Icons.mic,          label: 'இருமுறை தட்டவும்',  hint: 'குரல் கட்டளை'),
                                     const SizedBox(height: 4),
-                                    _GestureHint(icon: Icons.replay,       label: 'Long press',  hint: 'Repeat last alert'),
+                                    _GestureHint(icon: Icons.replay,       label: 'அழுத்திப் பிடிக்க',  hint: 'மீண்டும் கேட்க'),
                                     const SizedBox(height: 4),
-                                    _GestureHint(icon: Icons.swipe_up,     label: 'Swipe up',    hint: 'Identify person'),
+                                    _GestureHint(icon: Icons.swipe_up,     label: 'மேலே ஸ்வைப்',    hint: 'யார் என்று பார்க்க'),
                                   ],
                                 ),
                               ),
 
                             // ── LISTENING overlay ─────────────────────────
-                            // Shown regardless of detection state so the user
-                            // ALWAYS sees a clear red banner when the mic is on.
                             if (_voiceActive)
                               Positioned(
                                 top: 8, left: 0, right: 0,
@@ -1081,12 +1247,12 @@ class _MainAIScreenState extends State<MainAIScreen>
                                         padding: const EdgeInsets.symmetric(
                                             horizontal: 18, vertical: 9),
                                         decoration: BoxDecoration(
-                                          color: const Color(0xFFE53935),
+                                          color: Colors.black,
                                           borderRadius: BorderRadius.circular(26),
+                                          border: Border.all(color: Colors.white, width: 2),
                                           boxShadow: [BoxShadow(
-                                            color: const Color(0xFFE53935)
-                                                .withValues(alpha: 0.55),
-                                            blurRadius: 16, spreadRadius: 2)],
+                                            color: Colors.white.withValues(alpha: 0.3),
+                                            blurRadius: 12, spreadRadius: 1)],
                                         ),
                                         child: const Row(
                                             mainAxisSize: MainAxisSize.min,
@@ -1094,7 +1260,7 @@ class _MainAIScreenState extends State<MainAIScreen>
                                           Icon(Icons.mic,
                                               color: Colors.white, size: 17),
                                           SizedBox(width: 7),
-                                          Text('LISTENING...',
+                                          Text('கேட்கிறது...',
                                               style: TextStyle(
                                                 color: Colors.white,
                                                 fontSize: 14,
@@ -1119,13 +1285,14 @@ class _MainAIScreenState extends State<MainAIScreen>
                                     child: Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                                       decoration: BoxDecoration(
-                                          color: AppColors.green,
+                                          color: Colors.black,
+                                          border: Border.all(color: Colors.white, width: 1.5),
                                           borderRadius: BorderRadius.circular(20)),
                                       child: const Row(children: [
                                         Icon(Icons.fiber_manual_record,
                                             color: Colors.white, size: 9),
                                         SizedBox(width: 4),
-                                        Text('LIVE', style: TextStyle(
+                                        Text('செயலில்', style: TextStyle(
                                             color: Colors.white, fontSize: 11,
                                             fontWeight: FontWeight.w800, letterSpacing: 0.5)),
                                       ]),
@@ -1134,101 +1301,198 @@ class _MainAIScreenState extends State<MainAIScreen>
                                 ),
                               ),
 
-                              // Very close warning badge
+                              // Very close warning badge (Section 19: நிறுத்தவும்)
                               if (_detLabel.isNotEmpty && _distanceM < 1.2)
                                 Positioned(
                                   top: 12, right: 12,
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                                     decoration: BoxDecoration(
-                                        color: const Color(0xFFEF5350),
+                                        color: Colors.white,
                                         borderRadius: BorderRadius.circular(20)),
                                     child: const Row(children: [
                                       Icon(Icons.warning_amber_rounded,
-                                          color: Colors.white, size: 14),
+                                          color: Colors.black, size: 14),
                                       SizedBox(width: 4),
-                                      Text('VERY CLOSE', style: TextStyle(
-                                          color: Colors.white, fontSize: 11,
-                                          fontWeight: FontWeight.w800)),
+                                      Text('நிறுத்தவும்', style: TextStyle(
+                                          color: Colors.black, fontSize: 11,
+                                          fontWeight: FontWeight.w900)),
                                     ]),
                                   ),
                                 ),
 
-                              // Detection result overlay (NO confidence %)
+                              // ── Developer Debug HUD ─────────────────────
+                              if (_debugModeEnabled) _buildDebugOverlay(),
+
+                              // Detection result overlay (Sections 18 & 19: Accessibility-first Black & White UI)
                               if (_detLabel.isNotEmpty)
                                 Positioned(
                                   bottom: 12, left: 12, right: 12,
-                                  child: Container(
-                                    padding: const EdgeInsets.all(14),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withValues(alpha: 0.88),
-                                      borderRadius: BorderRadius.circular(14),
-                                      border: Border.all(
-                                          color: _distColor.withValues(alpha: 0.4), width: 1.5),
-                                    ),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(_detLabel,
-                                            style: const TextStyle(
-                                                color: AppColors.yellow,
-                                                fontSize: 22,
-                                                fontWeight: FontWeight.w800)),
-                                        const SizedBox(height: 8),
-                                        Row(children: [
-                                          // Distance pill
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                                horizontal: 10, vertical: 4),
-                                            decoration: BoxDecoration(
-                                              color: _distColor.withValues(alpha: 0.15),
-                                              borderRadius: BorderRadius.circular(20),
-                                              border: Border.all(
-                                                  color: _distColor.withValues(alpha: 0.6)),
-                                            ),
-                                            child: Row(children: [
-                                              Icon(
-                                                _distanceM < 1.2
-                                                    ? Icons.warning_amber_rounded
-                                                    : Icons.straighten,
-                                                color: _distColor, size: 13),
-                                              const SizedBox(width: 4),
-                                              Text(_distance,
-                                                  style: TextStyle(
-                                                      color: _distColor,
-                                                      fontSize: 13,
-                                                      fontWeight: FontWeight.w700)),
-                                            ]),
+                                  child: _isStopAction
+                                      ? Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(color: Colors.white, width: 2.5),
                                           ),
-                                          const SizedBox(width: 10),
-                                          // Direction pill
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                                horizontal: 10, vertical: 4),
-                                            decoration: BoxDecoration(
-                                              color: AppColors.greyDark,
-                                              borderRadius: BorderRadius.circular(20),
-                                            ),
-                                            child: Row(children: [
-                                              Icon(
-                                                _direction == 'LEFT'
-                                                    ? Icons.arrow_back
-                                                    : _direction == 'RIGHT'
-                                                        ? Icons.arrow_forward
-                                                        : Icons.arrow_upward,
-                                                color: AppColors.white, size: 12),
-                                              const SizedBox(width: 4),
-                                              Text(_direction,
-                                                  style: const TextStyle(
-                                                      color: AppColors.white,
-                                                      fontSize: 12,
-                                                      fontWeight: FontWeight.w600)),
-                                            ]),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  const Icon(Icons.pan_tool, color: Colors.black, size: 28),
+                                                  const SizedBox(width: 10),
+                                                  Expanded(
+                                                    child: Text(
+                                                      _navigationActionDirective,
+                                                      style: const TextStyle(
+                                                        color: Colors.black,
+                                                        fontSize: 26,
+                                                        fontWeight: FontWeight.w900,
+                                                        letterSpacing: 0.5,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                _navigationStatusHeader,
+                                                style: const TextStyle(
+                                                  color: Colors.black,
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                children: [
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black,
+                                                      borderRadius: BorderRadius.circular(20),
+                                                    ),
+                                                    child: Row(
+                                                      children: [
+                                                        const Icon(Icons.straighten, color: Colors.white, size: 13),
+                                                        const SizedBox(width: 4),
+                                                        Text(
+                                                          '${_distanceM.toStringAsFixed(1)} மீ${_distance.isNotEmpty ? ' • $_distance' : ''}',
+                                                          style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black,
+                                                      borderRadius: BorderRadius.circular(20),
+                                                    ),
+                                                    child: Text(
+                                                      _detLabel.isNotEmpty ? _detLabel : 'தடை',
+                                                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
                                           ),
-                                        ]),
-                                      ],
-                                    ),
-                                  ),
+                                        )
+                                      : Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withValues(alpha: 0.92),
+                                            borderRadius: BorderRadius.circular(16),
+                                            border: Border.all(color: Colors.white, width: 2.0),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                children: [
+                                                  Icon(_navigationActionIcon, color: Colors.white, size: 28),
+                                                  const SizedBox(width: 10),
+                                                  Expanded(
+                                                    child: Text(
+                                                      _navigationActionDirective,
+                                                      style: const TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 24,
+                                                        fontWeight: FontWeight.w900,
+                                                        letterSpacing: 0.5,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 4),
+                                              Text(
+                                                _navigationStatusHeader,
+                                                style: const TextStyle(
+                                                  color: AppColors.greyLight,
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Row(
+                                                children: [
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black,
+                                                      borderRadius: BorderRadius.circular(20),
+                                                      border: Border.all(color: Colors.white),
+                                                    ),
+                                                    child: Row(
+                                                      children: [
+                                                        const Icon(Icons.straighten, color: Colors.white, size: 13),
+                                                        const SizedBox(width: 4),
+                                                        Text(
+                                                          _currentNavAction == NavigationAction.clear
+                                                              ? (_distance.isNotEmpty ? _distance : 'தெளிவு')
+                                                              : '${_distanceM.toStringAsFixed(1)} மீ${_distance.isNotEmpty ? ' • $_distance' : ''}',
+                                                          style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black,
+                                                      borderRadius: BorderRadius.circular(20),
+                                                      border: Border.all(color: Colors.white),
+                                                    ),
+                                                    child: Row(
+                                                      children: [
+                                                        Icon(
+                                                          _direction == 'LEFT'
+                                                              ? Icons.arrow_back
+                                                              : _direction == 'RIGHT'
+                                                                  ? Icons.arrow_forward
+                                                                  : Icons.arrow_upward,
+                                                          color: Colors.white,
+                                                          size: 13,
+                                                        ),
+                                                        const SizedBox(width: 4),
+                                                        Text(
+                                                          _direction == 'LEFT' ? 'இடப்பக்கம்' : (_direction == 'RIGHT' ? 'வலப்பக்கம்' : 'முன்னால்'),
+                                                          style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
+                                          ),
+                                        ),
                                 ),
 
                               // Scanning spinner (no detection yet)
@@ -1239,17 +1503,18 @@ class _MainAIScreenState extends State<MainAIScreen>
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 14, vertical: 10),
                                     decoration: BoxDecoration(
-                                      color: Colors.black.withValues(alpha: 0.5),
+                                      color: Colors.black.withValues(alpha: 0.88),
                                       borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: Colors.white, width: 1.5),
                                     ),
                                     child: const Row(children: [
                                       SizedBox(width: 14, height: 14,
                                           child: CircularProgressIndicator(
-                                              color: AppColors.green, strokeWidth: 2)),
+                                              color: Colors.white, strokeWidth: 2)),
                                       SizedBox(width: 10),
-                                      Text('Scanning for obstacles...',
+                                      Text('பாதை கண்காணிக்கப்படுகிறது...',
                                           style: TextStyle(
-                                              color: AppColors.greyLight, fontSize: 13)),
+                                              color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
                                     ]),
                                   ),
                                 ),
@@ -1262,14 +1527,14 @@ class _MainAIScreenState extends State<MainAIScreen>
                                 const Icon(Icons.no_photography_outlined,
                                     color: AppColors.danger, size: 60),
                                 const SizedBox(height: 16),
-                                const Text('Camera Permission Required',
+                                const Text('கேமரா அனுமதி தேவை',
                                     style: TextStyle(
                                         color: AppColors.white,
-                                        fontSize: 15,
+                                        fontSize: 16,
                                         fontWeight: FontWeight.w700)),
                                 const SizedBox(height: 8),
                                 const Text(
-                                  'NavEye needs camera access\nto detect obstacles.',
+                                  'தடைகளைக் கண்டறிய நாவ்ஐ செயலிற்கு\nகேமரா அனுமதி தேவை.',
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
                                       color: AppColors.grey, fontSize: 13, height: 1.5)),
@@ -1279,7 +1544,7 @@ class _MainAIScreenState extends State<MainAIScreen>
                                     await openAppSettings();
                                   },
                                   icon: const Icon(Icons.settings, size: 16),
-                                  label: const Text('Open App Settings',
+                                  label: const Text('அமைப்புகளைத் திறக்கவும்',
                                       style: TextStyle(fontWeight: FontWeight.w700)),
                                   style: ElevatedButton.styleFrom(
                                     backgroundColor: AppColors.yellow,
@@ -1294,7 +1559,7 @@ class _MainAIScreenState extends State<MainAIScreen>
                                     setState(() => _cameraPermDenied = false);
                                     _initCamera();
                                   },
-                                  child: const Text('Retry',
+                                  child: const Text('மீண்டும் முயற்சிக்கவும்',
                                       style: TextStyle(color: AppColors.grey)),
                                 ),
                               ],
@@ -1305,7 +1570,7 @@ class _MainAIScreenState extends State<MainAIScreen>
                                 CircularProgressIndicator(
                                     color: AppColors.yellow, strokeWidth: 2),
                                 SizedBox(height: 16),
-                                Text('Initializing camera...',
+                                Text('கேமரா தொடங்குகிறது...',
                                     style: TextStyle(
                                         color: AppColors.greyLight, fontSize: 14)),
                               ],
@@ -1324,21 +1589,22 @@ class _MainAIScreenState extends State<MainAIScreen>
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
             child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
 
-              // ── People ──────────────────────────────────────────────────────
+              // ── People (Section 17: Black and White) ───────────────────────
               Expanded(
                 child: GestureDetector(
                   onTap: _showPeopleMenu,
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     decoration: BoxDecoration(
-                      color: AppColors.yellow,
+                      color: Colors.black,
                       borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.white, width: 1.5),
                     ),
                     child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Icon(Icons.people, color: Colors.black, size: 20),
+                      Icon(Icons.people, color: Colors.white, size: 20),
                       SizedBox(height: 4),
-                      Text('People', style: TextStyle(
-                          color: Colors.black, fontSize: 12, fontWeight: FontWeight.w700)),
+                      Text('நபர்கள்', style: TextStyle(
+                          color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
                     ]),
                   ),
                 ),
@@ -1346,30 +1612,26 @@ class _MainAIScreenState extends State<MainAIScreen>
 
               const SizedBox(width: 10),
 
-              // ── Microphone ─────────────────────────────────────────────────
-              // Large centred circle — unmistakably ON (red) or OFF (grey).
+              // ── Microphone (Section 17: Black and White) ────────────────────
               GestureDetector(
                 onTap: _startVoiceListen,
                 child: AnimatedBuilder(
                   animation: _pulseAnim,
                   builder: (_, __) {
                     final active = _voiceActive;
-                    // RED when listening, dark grey when off
-                    const onColor  = Color(0xFFE53935); // red
-                    const offColor = AppColors.surface;
                     return AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
                       width: 72, height: 72,
                       decoration: BoxDecoration(
-                        color:  active ? onColor  : offColor,
-                        shape:  BoxShape.circle,
+                        color: active ? Colors.white : Colors.black,
+                        shape: BoxShape.circle,
                         border: Border.all(
-                          color: active ? onColor : AppColors.greyDark,
+                          color: Colors.white,
                           width: 3,
                         ),
                         boxShadow: active
                             ? [BoxShadow(
-                                color: onColor.withValues(
+                                color: Colors.white.withValues(
                                     alpha: 0.30 + 0.35 * _pulseAnim.value),
                                 blurRadius: 18 + 12 * _pulseAnim.value,
                                 spreadRadius: 3)]
@@ -1378,15 +1640,15 @@ class _MainAIScreenState extends State<MainAIScreen>
                       child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                         Icon(
                           active ? Icons.mic : Icons.mic_none,
-                          color:  active ? Colors.white : AppColors.grey,
-                          size:   active ? 30 : 26,
+                          color: active ? Colors.black : Colors.white,
+                          size: active ? 30 : 26,
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          active ? 'STOP' : 'SPEAK',
+                          active ? 'நிறுத்து' : 'பேசு',
                           style: TextStyle(
-                            color:      active ? Colors.white : AppColors.grey,
-                            fontSize:   9,
+                            color: active ? Colors.black : Colors.white,
+                            fontSize: 9,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 0.4,
                           ),
@@ -1399,7 +1661,7 @@ class _MainAIScreenState extends State<MainAIScreen>
 
               const SizedBox(width: 10),
 
-              // ── Settings ───────────────────────────────────────────────────
+              // ── Settings (Section 17: Black and White) ──────────────────────
               Expanded(
                 child: GestureDetector(
                   onTap: () async {
@@ -1408,19 +1670,22 @@ class _MainAIScreenState extends State<MainAIScreen>
                     await _detector.refreshSensitivity();
                     await _tts.init();
                     final p = await SharedPreferences.getInstance();
-                    if (mounted) setState(() =>
-                        _vibrationEnabled = p.getBool('vibration') ?? true);
+                    if (mounted) {
+                      setState(() =>
+                          _vibrationEnabled = p.getBool('vibration') ?? true);
+                    }
                   },
                   child: Container(
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     decoration: BoxDecoration(
-                      color: AppColors.greyDark,
+                      color: Colors.black,
                       borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.white, width: 1.5),
                     ),
                     child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                       Icon(Icons.settings, color: Colors.white, size: 20),
                       SizedBox(height: 4),
-                      Text('Settings', style: TextStyle(
+                      Text('அமைப்புகள்', style: TextStyle(
                           color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700)),
                     ]),
                   ),
@@ -1429,6 +1694,89 @@ class _MainAIScreenState extends State<MainAIScreen>
             ]),
           ),
         ]),
+      ),
+      CalmStartupOverlay(flowManager: _startupFlowManager),
+    ],
+  ),
+);
+}
+
+  Widget _buildDebugOverlay() {
+    return Positioned(
+      top: 48,
+      left: 12,
+      right: 12,
+      child: ValueListenableBuilder<VoiceDebugInfo>(
+        valueListenable: _voiceAlert.debugNotifier,
+        builder: (context, info, _) {
+          return Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.88),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.yellow, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 8,
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Row(
+                  children: [
+                    Icon(Icons.bug_report, color: AppColors.yellow, size: 16),
+                    SizedBox(width: 6),
+                    Text(
+                      'DEVELOPER DEBUG MODE',
+                      style: TextStyle(
+                        color: AppColors.yellow,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ],
+                ),
+                const Divider(color: AppColors.greyDark, height: 12),
+                _debugRow('Detected object:', info.objectName),
+                _debugRow('Confidence:', info.confidence > 0 ? info.confidence.toStringAsFixed(2) : '0.00'),
+                _debugRow('Position:', info.position),
+                _debugRow('Approximate proximity:', info.proximity),
+                _debugRow('Announcement:', '"${info.announcement}"'),
+                _debugRow(
+                  'Announcement cooldown:',
+                  info.cooldownActive ? 'ACTIVE' : 'INACTIVE',
+                  valueColor: info.cooldownActive ? AppColors.greyLight : AppColors.white,
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _debugRow(String label, String value, {Color valueColor = AppColors.white}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(color: AppColors.greyLight, fontSize: 11)),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: TextStyle(color: valueColor, fontSize: 11, fontWeight: FontWeight.w700),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1515,20 +1863,12 @@ class _DetectionBoxPainter extends CustomPainter {
     required this.pulseValue,
   });
 
-  // Distance → colour
-  Color get _boxColor {
-    final d = result.distanceM;
-    if (d < 0.8)  return const Color(0xFFEF5350); // red   — danger
-    if (d < 1.5)  return const Color(0xFFFFA726); // orange — very close
-    if (d < 3.0)  return const Color(0xFFFFEB3B); // yellow — caution
-    return        const Color(0xFF66BB6A);          // green  — safe
-  }
+  // Distance → colour (Strict Black and White Theme)
+  Color get _boxColor => Colors.white;
 
   @override
   void paint(Canvas canvas, Size size) {
     // ── Direct coordinate mapping ────────────────────────────────────────────
-    // CameraPreview fills the entire Stack (StackFit.expand → tight constraints).
-    // TFLite normalized coords [0,1] map directly to canvas pixels.
     final l = result.xMin * size.width;
     final t = result.yMin * size.height;
     final r = result.xMax * size.width;
@@ -1566,19 +1906,16 @@ class _DetectionBoxPainter extends CustomPainter {
     // ── Subtle fill ───────────────────────────────────────────────────────────
     canvas.drawRect(
       Rect.fromLTRB(l, t, r, b),
-      Paint()..color = color.withValues(alpha: isDanger ? 0.10 + 0.08 * pulseValue : 0.08),
+      Paint()..color = color.withValues(alpha: isDanger ? 0.12 + 0.08 * pulseValue : 0.08),
     );
 
     // ── Corner brackets ───────────────────────────────────────────────────────
     final boxShort = (r - l) < (b - t) ? (r - l) : (b - t);
     final arm      = (boxShort * 0.22).clamp(14.0, 42.0);
     final sw       = isClose ? 3.2 + 1.8 * pulseValue : 2.8;
-    final bracketColor = isClose
-        ? Color.lerp(color, Colors.white, pulseValue * 0.25)!
-        : color;
 
     final p = Paint()
-      ..color      = bracketColor
+      ..color      = Colors.white
       ..strokeWidth = sw
       ..style       = PaintingStyle.stroke
       ..strokeCap   = StrokeCap.round;
@@ -1627,7 +1964,14 @@ class _DetectionBoxPainter extends CustomPainter {
         Rect.fromLTWH(tagLeft, tagTop, tagW, tagH),
         const Radius.circular(6),
       ),
-      Paint()..color = color,
+      Paint()..color = Colors.black,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(tagLeft, tagTop, tagW, tagH),
+        const Radius.circular(6),
+      ),
+      Paint()..color = Colors.white ..style = PaintingStyle.stroke ..strokeWidth = 1.5,
     );
     tp.paint(canvas, Offset(tagLeft + padX, tagTop + padY));
   }

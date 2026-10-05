@@ -38,16 +38,17 @@ class SecondaryButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       width: double.infinity, height: 52,
-      child: ElevatedButton(
+      child: OutlinedButton(
         onPressed: onPressed,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.green,
-          foregroundColor: Colors.white,
+        style: OutlinedButton.styleFrom(
+          backgroundColor: AppColors.background,
+          foregroundColor: AppColors.white,
+          side: const BorderSide(color: AppColors.white, width: 2),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
         child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
           if (icon != null) ...[Icon(icon, size: 18), const SizedBox(width: 8)],
-          Text(text, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          Text(text, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         ]),
       ),
     );
@@ -73,7 +74,7 @@ class NavEyeLogo extends StatelessWidget {
         child: const Icon(Icons.remove_red_eye_outlined, color: AppColors.yellow, size: 36),
       ),
       const SizedBox(height: 12),
-      const Text('NavEye',
+      const Text('VEYRA',
           style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: AppColors.white)),
       const Text('Your Assistant',
           style: TextStyle(fontSize: 13, color: AppColors.grey)),
@@ -173,16 +174,16 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
             if (mounted) setState(() => _listening = false);
           }
         },
-        listenFor: const Duration(seconds: 15),
-        pauseFor:  const Duration(seconds: 5),
         // FIX-2: onDevice: true fails on devices without an on-device speech
         // model (e.g. Samsung A30 Android 10 with no offline model installed).
         // Using cloud-based recognition (onDevice: false) is reliable on all
         // Android devices that have Google app installed.
         listenOptions: SpeechListenOptions(
-          cancelOnError:  false,
+          cancelOnError: false,
           partialResults: true,
-          onDevice:       false,
+          onDevice: false,
+          listenFor: const Duration(seconds: 15),
+          pauseFor: const Duration(seconds: 5),
         ),
       );
       // NOTE: raw.listen() returns as soon as the session STARTS (it is NOT
@@ -224,22 +225,22 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
             duration: const Duration(milliseconds: 200),
             width: 46, height: 46,
             decoration: BoxDecoration(
-              // ON      = green fill + glow (clearly active)
-              // OFF     = dark fill + yellow border (clearly tappable)
+              // ON      = white fill + glow (clearly active)
+              // OFF     = dark fill + white border (clearly tappable)
               // LOADING = dark fill + grey border (init in progress)
-              color: _listening ? AppColors.green : AppColors.surface,
+              color: _listening ? AppColors.white : AppColors.surface,
               shape: BoxShape.circle,
               border: Border.all(
                 color: _listening
-                    ? AppColors.green
+                    ? AppColors.white
                     : _sttAvailable == true
-                        ? AppColors.yellow
+                        ? AppColors.white
                         : AppColors.greyDark,
-                width: _listening ? 2.0 : 1.5,
+                width: _listening ? 2.5 : 1.5,
               ),
               boxShadow: _listening
                   ? [BoxShadow(
-                      color: AppColors.green.withValues(alpha: 0.4),
+                      color: AppColors.white.withValues(alpha: 0.4),
                       blurRadius: 10, spreadRadius: 1)]
                   : null,
             ),
@@ -251,11 +252,11 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
                         strokeWidth: 1.5, color: AppColors.grey))
                 : Icon(
                     _listening ? Icons.mic : Icons.mic_none,
-                    // ON = white;  OFF ready = yellow;  unavailable = grey
+                    // ON = black; OFF ready = white; unavailable = grey
                     color: _listening
-                        ? Colors.white
+                        ? Colors.black
                         : _sttAvailable == true
-                            ? AppColors.yellow
+                            ? AppColors.white
                             : AppColors.grey,
                     size: 22,
                   ),

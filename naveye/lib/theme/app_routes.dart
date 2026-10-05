@@ -10,4 +10,5 @@ class AppRoutes {
   static const String peopleEnterName    = '/people/enter-name';
   static const String personAdded        = '/people/added';
   static const String peopleList         = '/people/list';
+  static const String eventHistory       = '/history';
 }

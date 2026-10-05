@@ -11,8 +11,8 @@ class _UserGuidelinesScreenState extends State<UserGuidelinesScreen> {
   final _steps = const [
     {'title':'Play User Instructions','desc':'Tap the speaker icon to hear audio instructions.','voice':'Say: Repeat, Next, or Back','icon':Icons.volume_up},
     {'title':'Start Detection','desc':'Tap the camera area to begin obstacle detection.','voice':'Say: Start to begin','icon':Icons.camera_alt},
-    {'title':'Listen for Alerts','desc':'NavEye speaks obstacle name, direction and distance.','voice':'Say: Repeat to hear again','icon':Icons.hearing},
-    {'title':'Add Known People','desc':'Capture faces so NavEye can recognise and announce them.','voice':'Say: Who is this','icon':Icons.people},
+    {'title':'Listen for Alerts','desc':'Veyra speaks obstacle name, direction and distance.','voice':'Say: Repeat to hear again','icon':Icons.hearing},
+    {'title':'Add Known People','desc':'Capture faces so Veyra can recognise and announce them.','voice':'Say: Who is this','icon':Icons.people},
     {'title':'Adjust Settings','desc':'Change volume, language and AI sensitivity in Settings.','voice':'Say: Open settings','icon':Icons.settings},
   ];
   @override

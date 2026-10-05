@@ -1,15 +1,38 @@
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
 import 'shared_stt.dart';
 
 enum VoiceCommand {
-  start, stop, repeat, whoIsThis, openSettings, openPeople, help, unknown
+  start,
+  stop,
+  repeat,
+  whoIsThis,
+  openSettings,
+  openPeople,
+  help,
+  whereAmI,
+  detectObjects,
+  switchCamera,
+  changeLanguage,
+  addPerson,
+  cancel,
+  goBack,
+  identifyCurrency,
+  readText,
+  findObject,
+  emergencySOS,
+  toggleTorch,
+  fasterSpeed,
+  slowerSpeed,
+  unknown
 }
 
 class VoiceCommandService {
   bool _listening = false;
   bool get isListening => _listening;
+  String lastQuery = '';
 
   /// Lazy-init: call this to warm up STT when convenient (e.g. after the first
   /// tap). Intentionally avoided at app start on Samsung devices because calling
@@ -52,6 +75,7 @@ class VoiceCommandService {
       if (done) return;
       done = true;
       _listening = false;
+      lastQuery = words;
       SharedStt.instance.clearListeners();
       await SharedStt.instance.stop();
       debugPrint('VoiceCmd recognised: "$words"');
@@ -129,7 +153,10 @@ class VoiceCommandService {
     });
 
     try {
-      debugPrint('STT listen ← VoiceCommandService (onDevice=$onDevice retryLeft=$retryLeft)');
+      final prefs = await SharedPreferences.getInstance();
+      final lang = (prefs.getString('language') ?? 'Tamil').toLowerCase();
+      final localeId = lang.contains('english') ? 'en_US' : 'ta_IN';
+      debugPrint('STT listen ← VoiceCommandService (localeId=$localeId onDevice=$onDevice retryLeft=$retryLeft)');
       await SharedStt.instance.raw.listen(
         onResult: (result) {
           final words = result.recognizedWords.toLowerCase().trim();
@@ -142,12 +169,13 @@ class VoiceCommandService {
           final cmd = _parse(words);
           if (cmd != VoiceCommand.unknown) finish(words);
         },
-        listenFor: const Duration(seconds: 10), // was 15 — faster timeout
-        pauseFor:  const Duration(seconds: 2),  // was 5 — responds quicker after speech ends
         listenOptions: SpeechListenOptions(
-          cancelOnError:  false,
+          localeId: localeId,
+          cancelOnError: false,
           partialResults: true,
-          onDevice:       onDevice,
+          onDevice: onDevice,
+          listenFor: const Duration(seconds: 10),
+          pauseFor: const Duration(seconds: 2),
         ),
       );
     } catch (e) {
@@ -162,28 +190,83 @@ class VoiceCommandService {
     await SharedStt.instance.stop();
   }
 
+  /// Parses transcribed words into a VoiceCommand (public for testing and offline fallback)
+  VoiceCommand parseCommand(String words) => _parse(words);
+
   VoiceCommand _parse(String words) {
     if (words.isEmpty) { return VoiceCommand.unknown; }
-    if (_has(words, ['start', 'begin', 'go', 'detect', 'scan', 'activate'])) {
+    final lower = words.toLowerCase().trim();
+
+    // 1. Emergency SOS has the absolute highest priority
+    if (_has(lower, ['அவசரம்', 'காப்பாற்று', 'ஆபத்து', 'sos', 'emergency', 'distress', 'அவசர உதவி', 'உதவி'])) {
+      return VoiceCommand.emergencySOS;
+    }
+    // 2. Start / Stop controls
+    if (_has(lower, ['start', 'begin', 'go', 'detect', 'scan', 'activate', 'தொடங்கு', 'ஆரம்பி'])) {
       return VoiceCommand.start;
     }
-    if (_has(words, ['stop', 'end', 'off', 'pause', 'halt', 'cancel', 'finish', 'deactivate'])) {
+    if (_has(lower, ['stop', 'end', 'off', 'pause', 'halt', 'cancel', 'finish', 'deactivate', 'நிறுத்து', 'முடி'])) {
       return VoiceCommand.stop;
     }
-    if (_has(words, ['repeat', 'again', 'say again', 'what was that', 'pardon', 'what did'])) {
+    if (_has(lower, ['repeat', 'again', 'say again', 'what was that', 'pardon', 'what did', 'மீண்டும்', 'திரும்ப'])) {
       return VoiceCommand.repeat;
     }
-    if (_has(words, ['who', 'identify', 'name', 'face', 'recognize', 'recognise'])) {
+    // 3. Assistive Utilities
+    if (_has(lower, ['பணம்', 'ரூபாய்', 'நோட்டு', 'காசு', 'currency', 'money', 'rupee', 'banknote', 'cash'])) {
+      return VoiceCommand.identifyCurrency;
+    }
+    if (_has(lower, ['படி', 'எழுத்து', 'பலகை', 'வாசி', 'அறிவிப்பு', 'read', 'text', 'signboard', 'sign', 'ocr'])) {
+      return VoiceCommand.readText;
+    }
+    // Object Finder (e.g. "சாவி எங்கே", "பாட்டில் எங்கே", "find keys")
+    if (_has(lower, ['சாவி', 'பாட்டில்', 'கப்', 'find', 'where is', 'search', 'நாற்காலி', 'தேடு']) ||
+        (lower.contains('எங்கே') && !lower.contains('நான்') && !lower.contains('இருப்பிடம்'))) {
+      return VoiceCommand.findObject;
+    }
+    // Torch / Flashlight
+    if (_has(lower, ['டார்ச்', 'வெளிச்சம்', 'விளக்கு', 'torch', 'flashlight', 'light'])) {
+      return VoiceCommand.toggleTorch;
+    }
+    // Speech Rate
+    if (_has(lower, ['வேகமாக', 'வேகம்', 'faster', 'speed up'])) {
+      return VoiceCommand.fasterSpeed;
+    }
+    if (_has(lower, ['மெதுவாக', 'slower', 'slow down', 'normal speed'])) {
+      return VoiceCommand.slowerSpeed;
+    }
+    // Location / Person
+    if (_has(lower, ['who', 'identify', 'name', 'face', 'recognize', 'recognise', 'யார்', 'முகம்'])) {
       return VoiceCommand.whoIsThis;
     }
-    if (_has(words, ['settings', 'setting', 'configure', 'options', 'preferences', 'config'])) {
+    if (_has(lower, ['where am i', 'where am i now', 'current location', 'my location', 'location', 'நான் எங்கே', 'இருப்பிடம்', 'இடம்'])) {
+      return VoiceCommand.whereAmI;
+    }
+    if (_has(lower, ['detect object', 'detect objects', 'scan around', 'what is in front', 'what is ahead', 'look around', 'தடை', 'பார்'])) {
+      return VoiceCommand.detectObjects;
+    }
+    if (_has(lower, ['front camera', 'selfie camera', 'front', 'rear camera', 'back camera', 'switch camera', 'camera', 'கேமரா'])) {
+      return VoiceCommand.switchCamera;
+    }
+    if (_has(lower, ['change language', 'switch language', 'language to', 'english', 'tamil', 'sinhala', 'மொழி', 'தமிழ்', 'ஆங்கிலம்'])) {
+      return VoiceCommand.changeLanguage;
+    }
+    if (_has(lower, ['add person', 'new person', 'save person', 'register person', 'நபரை சேர்'])) {
+      return VoiceCommand.addPerson;
+    }
+    if (_has(lower, ['settings', 'setting', 'configure', 'options', 'preferences', 'config', 'அமைப்பு', 'அமைப்புகள்'])) {
       return VoiceCommand.openSettings;
     }
-    if (_has(words, ['people', 'persons', 'faces', 'contacts', 'add person', 'manage'])) {
+    if (_has(lower, ['people', 'persons', 'faces', 'contacts', 'manage', 'நபர்கள்', 'மனிதர்கள்'])) {
       return VoiceCommand.openPeople;
     }
-    if (_has(words, ['help', 'commands', 'assist', 'guide', 'instructions', 'what can'])) {
+    if (_has(lower, ['help', 'commands', 'assist', 'guide', 'instructions', 'what can', 'வழிமுறைகள்', 'உதவிக்குறிப்பு', 'கட்டளைகள்'])) {
       return VoiceCommand.help;
+    }
+    if (_has(lower, ['cancel', 'close', 'dismiss', 'stop listening', 'ரத்து'])) {
+      return VoiceCommand.cancel;
+    }
+    if (_has(lower, ['go back', 'back', 'return', 'பின்னால்'])) {
+      return VoiceCommand.goBack;
     }
     return VoiceCommand.unknown;
   }

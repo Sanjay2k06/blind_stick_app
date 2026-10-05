@@ -451,7 +451,7 @@ class DetectorService {
 
       if (xCtr < 0.05 || xCtr > 0.95) continue; // extreme edge — relaxed
 
-      final direction = xCtr < 0.33 ? 'left' : xCtr > 0.66 ? 'right' : 'centre';
+      final direction = xCtr < 0.35 ? 'left' : xCtr > 0.65 ? 'right' : 'center';
       final realH     = _heights[rawLabel] ?? 1.0;
       final effH      = (boxH > boxW * 0.6) ? boxH : boxW * 0.6;
       final distM     = (0.866 * realH / effH).clamp(0.3, 15.0);

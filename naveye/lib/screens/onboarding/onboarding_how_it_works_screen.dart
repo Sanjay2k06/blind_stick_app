@@ -16,14 +16,13 @@ class _OnboardingHowItWorksScreenState extends State<OnboardingHowItWorksScreen>
   bool _playing = false;
 
   static const String _instructions =
-      'Welcome to NavEye, your AI blind assistance app. '
-      'Here is how to use it. '
-      'Step 1. Point your phone camera forward while walking. '
-      'Step 2. NavEye detects obstacles and speaks their name, direction, and distance to you. '
-      'Step 3. Say Start to begin detection. Say Stop to stop. Say Repeat to hear the last detection again. '
-      'Say Who is this to identify a person in front of you. '
-      'To add a person, tap the People button and take their photo. '
-      'You are ready to use NavEye. Tap I Understand to continue.';
+      'பார்வையற்றோருக்கான நாவ்ஐ வழிகாட்டுதல் செயலிற்கு வரவேற்கிறோம். '
+      'பயன்படுத்தும் முறை: '
+      'படி 1. நடக்கும் போது உங்கள் கைபேசி கேமராவை முன்னோக்கி வைக்கவும். '
+      'படி 2. தடையைக் கண்டறிந்து வழிகாட்டும் குரல் எச்சரிக்கைகளைக் கேட்கவும். '
+      'படி 3. தொடங்கு, நிறுத்து, அல்லது யார் இது போன்ற குரல் கட்டளைகளைப் பயன்படுத்தலாம். '
+      'நபரைச் சேர்க்க, நபர்கள் பொத்தானைத் தட்டவும். '
+      'தொடங்க நான் புரிந்துகொண்டேன் என்பதைத் தட்டவும்.';
 
   @override
   void initState() {
@@ -81,14 +80,14 @@ class _OnboardingHowItWorksScreenState extends State<OnboardingHowItWorksScreen>
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: AppColors.white)),
             const SizedBox(height: 12),
             Text(
-              _playing ? 'Playing instructions...' : 'Listen to learn how to use NavEye',
+              _playing ? 'Playing instructions...' : 'Listen to learn how to use Veyra',
               textAlign: TextAlign.center,
               style: TextStyle(color: _playing ? AppColors.green : AppColors.greyLight, fontSize: 14),
             ),
             const SizedBox(height: 40),
             const _Step(number: '1', text: 'Point your phone camera forward while walking'),
             const SizedBox(height: 16),
-            const _Step(number: '2', text: 'NavEye detects obstacles and speaks name, direction & distance'),
+            const _Step(number: '2', text: 'Veyra detects obstacles and speaks name, direction & distance'),
             const SizedBox(height: 16),
             const _Step(number: '3', text: 'Say "Start", "Stop", "Repeat", or "Who is this" to control'),
             const Spacer(),

@@ -45,13 +45,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await p.setBool('vibration',        _vib);
     await p.setString('ai_sensitivity', _ai);
     await _tts.init();
-    await _tts.speakNow('Settings saved.');
+    await _tts.speakNow(_tts.isTamil ? 'அமைப்புகள் சேமிக்கப்பட்டன.' : 'Settings saved.');
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Settings saved!'),
+        SnackBar(
+            content: Text(_tts.isTamil ? 'அமைப்புகள் சேமிக்கப்பட்டன!' : 'Settings saved!'),
             backgroundColor: AppColors.green,
-            duration: Duration(seconds: 2)));
+            duration: const Duration(seconds: 2)));
       Navigator.pop(context);
     }
   }
@@ -117,7 +117,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               final p = await SharedPreferences.getInstance();
               await p.setString('voice_volume', v);
               await _tts.init();
-              await _tts.speakNow('Volume set to $v');
+              final volTamil = switch (v) {
+                'Low' => 'குறைவு',
+                'High' => 'அதிகம்',
+                _ => 'நடுத்தரம்',
+              };
+              await _tts.speakNow(_tts.isTamil ? 'ஒலி அளவு $volTamil என அமைக்கப்பட்டது' : 'Volume set to $v');
             },
           )),
 
@@ -132,7 +137,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Switch(
                 value: _vib,
                 onChanged: (v) => setState(() => _vib = v),
-                activeColor: AppColors.green),
+                activeThumbColor: AppColors.green),
           ])),
 
           // ── AI Sensitivity ────────────────────────────────────────────────────

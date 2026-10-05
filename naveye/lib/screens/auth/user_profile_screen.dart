@@ -17,12 +17,12 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   final _ageCtrl       = TextEditingController();
   final _phoneCtrl     = TextEditingController();
   final _emergencyCtrl = TextEditingController();
-  String  _language    = 'English';
+  String  _language    = 'Tamil';
   bool    _isSaving    = false;
   bool    _viewMode    = false; // show read-only card after loading
 
   final TtsService _tts = TtsService();
-  static const _languages = ['English', 'Sinhala', 'Tamil'];
+  static const _languages = ['Tamil', 'English', 'Sinhala'];
 
   @override
   void initState() {
@@ -41,7 +41,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       _ageCtrl.text       = p.getString('user_age')       ?? '';
       _phoneCtrl.text     = p.getString('user_phone')     ?? '';
       _emergencyCtrl.text = p.getString('user_emergency') ?? '';
-      _language           = p.getString('language')       ?? 'English';
+      _language           = p.getString('language')       ?? 'Tamil';
       _viewMode           = _nameCtrl.text.isNotEmpty;
     });
   }
@@ -161,7 +161,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             style: const TextStyle(
                 color: AppColors.white, fontSize: 22, fontWeight: FontWeight.w700)),
         const SizedBox(height: 4),
-        const Text('NavEye User',
+        const Text('Veyra User',
             style: TextStyle(color: AppColors.grey, fontSize: 13)),
       ])),
       const SizedBox(height: 24),
@@ -250,7 +250,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700,
                 color: AppColors.white))),
         const SizedBox(height: 6),
-        const Center(child: Text('A few details help NavEye assist you better',
+        const Center(child: Text('A few details help Veyra assist you better',
             textAlign: TextAlign.center,
             style: TextStyle(color: AppColors.grey, fontSize: 13))),
         const SizedBox(height: 28),

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/app_routes.dart';
 import '../../widgets/common_widgets.dart';
@@ -7,6 +9,7 @@ import '../../services/database_service.dart';
 import '../../services/face_recognition_service.dart';
 import '../../services/tts_service.dart';
 import '../../services/shared_stt.dart';
+import '../../services/supabase_people_service.dart';
 import '../../models/person_model.dart';
 
 class PeopleEnterNameScreen extends StatefulWidget {
@@ -42,8 +45,7 @@ class _PeopleEnterNameScreenState extends State<PeopleEnterNameScreen> {
     Future.delayed(const Duration(milliseconds: 500), () async {
       await _tts.init();
       await _tts.speakNow(
-        'Photos taken. Please enter the person\'s name. '
-        'Tap the yellow microphone button and speak clearly.');
+        'புகைப்படங்கள் எடுக்கப்பட்டன. நபரின் பெயரை உள்ளிடவும் அல்லது மைக்ரோஃபோன் பொத்தானை அழுத்திப் பேசவும்.');
     });
   }
 
@@ -54,6 +56,52 @@ class _PeopleEnterNameScreenState extends State<PeopleEnterNameScreen> {
     _ctrl.dispose();
     _tts.dispose();
     super.dispose();
+  }
+
+  Future<bool> _promptYesNo(String name) async {
+    final completer = Completer<bool>();
+    await SharedStt.instance.stop();
+    SharedStt.instance.setErrorListener((e) {
+      debugPrint('Name confirmation STT error: ${e.errorMsg}');
+      SharedStt.instance.clearListeners();
+      if (!completer.isCompleted) completer.complete(false);
+    });
+    SharedStt.instance.setStatusListener((status) {
+      if ((status == 'notListening' || status == 'done') && !completer.isCompleted) {
+        Future.delayed(const Duration(milliseconds: 250), () {
+          if (!completer.isCompleted) completer.complete(false);
+        });
+      }
+    });
+
+    try {
+      await SharedStt.instance.raw.listen(
+        onResult: (result) {
+          final text = result.recognizedWords.trim().toLowerCase();
+          if (text.isEmpty) return;
+          if (result.finalResult) {
+            final accepts = text.contains('yes') || text.contains('save') || text.contains('confirm') || text.contains('correct');
+            final rejects = text.contains('no') || text.contains('cancel') || text.contains('wrong');
+            SharedStt.instance.clearListeners();
+            if (!completer.isCompleted) {
+              completer.complete(accepts && !rejects);
+            }
+          }
+        },
+        listenOptions: SpeechListenOptions(
+          cancelOnError: false,
+          partialResults: true,
+          onDevice: false,
+          listenFor: const Duration(seconds: 8),
+          pauseFor: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Voice confirmation error: $e');
+      if (!completer.isCompleted) completer.complete(false);
+    }
+
+    return completer.future.timeout(const Duration(seconds: 12), onTimeout: () => false);
   }
 
   Future<void> _save() async {
@@ -71,9 +119,17 @@ class _PeopleEnterNameScreenState extends State<PeopleEnterNameScreen> {
           backgroundColor: AppColors.danger));
       return;
     }
+
+    final name = _ctrl.text.trim();
+    await _tts.speakNow('$name என்று கூறியுள்ளீர்கள். இந்தப் பெயரைச் சேமிக்கவா?');
+    final confirmed = await _promptYesNo(name);
+    if (!confirmed) {
+      await _tts.speakNow('பெயர் சேமிக்கப்படவில்லை. மீண்டும் கூறவும்.');
+      return;
+    }
+
     setState(() => _isSaving = true);
     try {
-      final name        = _ctrl.text.trim();
       final primaryPath = _imagePaths.first;
       final person      = Person(name: name, imagePath: primaryPath, createdAt: DateTime.now());
       final saved       = await DatabaseService.instance.insertPerson(person);
@@ -81,7 +137,7 @@ class _PeopleEnterNameScreenState extends State<PeopleEnterNameScreen> {
       // Await embedding extraction BEFORE navigating — ensures quality gate
       // runs while the user is still on this screen.
       if (_imagePaths.isNotEmpty && saved.id != null) {
-        final ok = await _extractAndSaveEmbedding(saved.id!);
+        final ok = await _extractAndSaveEmbedding(saved.id!, personName: name);
         if (!ok) return; // quality gate failed — stayed on screen
       }
 
@@ -112,33 +168,35 @@ class _PeopleEnterNameScreenState extends State<PeopleEnterNameScreen> {
   /// reduces false positives while remaining robust to slight head turns.
   ///
   /// Returns true on success, false if no face was detected (quality gate fail).
-  Future<bool> _extractAndSaveEmbedding(int personId) async {
+  Future<bool> _extractAndSaveEmbedding(int personId, {required String personName}) async {
     final embeddings = <List<double>>[];
+    final qualityChecks = <bool>[];
     final total      = _imagePaths.length;
 
     for (final path in _imagePaths) {
       final emb = await FaceRecognitionService.instance.extractEmbeddingFromFile(path);
-      if (emb != null && emb.isNotEmpty) embeddings.add(emb);
+      if (emb != null && emb.isNotEmpty) {
+        embeddings.add(emb);
+        final quality = await FaceRecognitionService.instance.evaluateFaceQualityFromFile(path);
+        qualityChecks.add(quality?.passed ?? false);
+      }
     }
 
     // ── Quality gate ──────────────────────────────────────────────────────
-    if (embeddings.isEmpty) {
+    if (embeddings.isEmpty || qualityChecks.every((q) => q == false)) {
       await DatabaseService.instance.deletePerson(personId);
-      // Also delete ALL captured photo files — deletePerson only removes the
-      // primary path; side-angle photos are not stored in the DB.
       for (final path in _imagePaths) {
         try { File(path).deleteSync(); } catch (_) {}
       }
       await FaceRecognitionService.instance.refreshKnownPeople();
-      debugPrint('FaceEmbed: 0/$total photos had a face — registration cancelled');
+      debugPrint('FaceEmbed: 0/$total photos passed quality — registration cancelled');
       await _tts.speakNow(
-        'Registration failed. No face was detected in any of the photos. '
-        'Please retake in better lighting, closer to the camera.');
+        'பதிவு தோல்வியடைந்தது. முகம் சரியாகத் தெரியவில்லை. நல்ல வெளிச்சத்தில் மீண்டும் புகைப்படம் எடுக்கவும்.');
       if (mounted) {
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No face detected — please retake photos in better light'),
+            content: Text('No usable face detected — please retake in better light'),
             backgroundColor: AppColors.danger,
             duration: Duration(seconds: 5),
           ),
@@ -147,21 +205,46 @@ class _PeopleEnterNameScreenState extends State<PeopleEnterNameScreen> {
       return false;
     }
 
+    final duplicateCandidate = FaceRecognitionService.instance.findClosestLocalMatch(_concatEmbeddings(embeddings));
+    if (duplicateCandidate != null && duplicateCandidate.name != personName) {
+      await DatabaseService.instance.deletePerson(personId);
+      await _tts.speakNow('இந்த நபர் ஏற்கனவே ${duplicateCandidate.name} என்ற பெயரில் பதிவு செய்யப்பட்டுள்ளார்.');
+      if (mounted) {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('This person already exists as ${duplicateCandidate.name}'), backgroundColor: AppColors.green),
+        );
+      }
+      return false;
+    }
+
     if (embeddings.length < total) {
       debugPrint('FaceEmbed: ${embeddings.length}/$total photos had a face — partial');
       await _tts.speakNow(
-        'Face detected in ${embeddings.length} of $total photos. '
-        'Recognition may be less accurate.');
+        '$total படங்களில் ${embeddings.length} படங்களில் மட்டுமே முகம் கண்டறியப்பட்டது.');
     }
 
-    // ── Concatenate all per-angle embeddings ──────────────────────────────
-    // Each embedding is 512 dims. Stored as [emb0 | emb1 | emb2] = 1536 dims.
-    // FaceRecognitionService._bestScoreAgainstPerson() knows how to split them.
     final concatenated = _concatEmbeddings(embeddings);
     debugPrint('FaceEmbed: stored ${embeddings.length} angles → '
         '${concatenated.length} dims total (best-of-N matching)');
     await DatabaseService.instance.updateEmbedding(personId, concatenated);
     await FaceRecognitionService.instance.refreshKnownPeople();
+
+    final savedPerson = await DatabaseService.instance.getAllPersons().then(
+      (people) => people.firstWhere((person) => person.id == personId, orElse: () => Person(
+        id: personId,
+        name: personName,
+        imagePath: _imagePaths.first,
+        createdAt: DateTime.now(),
+        embedding: concatenated,
+      )),
+    );
+
+    await SupabasePeopleService.instance.syncPersonToSupabase(
+      person: savedPerson,
+      imagePath: _imagePaths.first,
+      embedding: concatenated,
+    );
     return true;
   }
 

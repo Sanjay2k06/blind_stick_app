@@ -24,10 +24,9 @@ class _OnboardingTellUsScreenState extends State<OnboardingTellUsScreen> {
     Future.microtask(() async {
       await _tts.init();
       await _tts.speakNow(
-        'Tell us about you. '
-        'Please enter your name using the mic button next to each field. '
-        'Tap the yellow microphone and speak clearly. '
-        'Only your name is required. All other fields are optional.',
+        'உங்களைப் பற்றி கூறுங்கள். '
+        'ஒவ்வொரு புலம் அருகிலும் உள்ள மைக்ரோஃபோன் பொத்தானை அழுத்தி உங்கள் பெயரைப் பேசவும். '
+        'உங்கள் பெயர் மட்டுமே கட்டாயம். மற்றவை விருப்பமானது.',
       );
     });
   }
@@ -44,7 +43,7 @@ class _OnboardingTellUsScreenState extends State<OnboardingTellUsScreen> {
 
   Future<void> _continue() async {
     if (_nameCtrl.text.trim().isEmpty) {
-      await _tts.speakNow('Please enter your name first.');
+      await _tts.speakNow('முதலில் உங்கள் பெயரை உள்ளிடவும்.');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(

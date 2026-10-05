@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/app_routes.dart';
 import '../../services/database_service.dart';
+import '../../services/face_recognition_service.dart';
 import '../../services/tts_service.dart';
 import '../../models/person_model.dart';
 
@@ -39,16 +40,15 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
     _imageExists
       ..clear()
       ..addAll(exists);
-    // BUG-C3 FIX: widget may be disposed while awaiting DB / file I/O above.
     if (!mounted) return;
     setState(() { _persons = persons; _loading = false; });
 
     // Announce how many people are saved
     if (persons.isEmpty) {
-      await _tts.speak('No people saved yet. Tap the add button to add a person.');
+      await _tts.speak('இன்னும் நபர்கள் சேர்க்கப்படவில்லை. புதிய நபரைச் சேர்க்க பொத்தானை அழுத்தவும்.');
     } else {
       final names = persons.map((p) => p.name).join(', ');
-      await _tts.speak('${persons.length} ${persons.length == 1 ? "person" : "people"} saved: $names');
+      await _tts.speak('${persons.length} நபர்கள் பதிவு செய்யப்பட்டுள்ளனர்: $names');
     }
   }
 
@@ -59,7 +59,7 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
       builder: (_) => AlertDialog(
         backgroundColor: AppColors.surface,
         title: const Text('Delete Person', style: TextStyle(color: AppColors.white)),
-        content: Text('Remove $name from NavEye?\nNavEye will no longer recognise them.',
+        content: Text('Remove $name from Veyra?\nVeyra will no longer recognise them.',
           style: const TextStyle(color: AppColors.greyLight, height: 1.5)),
         actions: [
           TextButton(
@@ -74,15 +74,21 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
       ),
     );
     if (confirm == true) {
-      // BUG-25 FIX: set loading before async delete so rapid taps can't
-      // hit stale indices while the list is reloading.
       setState(() => _loading = true);
-      await DatabaseService.instance.deletePerson(id);
-      // BUG-C2 FIX: widget may be disposed while awaiting DB delete.
+      await FaceRecognitionService.instance.deletePersonProfile(id);
       if (!mounted) return;
-      await _tts.speakNow('$name removed.');
+      await _tts.speakNow('$name நீக்கப்பட்டது.');
       await _loadPersons();
     }
+  }
+
+  Future<void> _resetOrEnrollSample() async {
+    setState(() => _loading = true);
+    await _tts.speakNow('10 மாதிரி புகைப்படங்களுடன் சுயவிவரம் பதிவு செய்யப்படுகிறது.');
+    await FaceRecognitionService.instance.resetSamplePersonProfile();
+    if (!mounted) return;
+    await _loadPersons();
+    await _tts.speakNow('லோகி வெற்றிகரமாகப் பதிவு செய்யப்பட்டார்.');
   }
 
   @override
@@ -101,6 +107,11 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
         ),
         title: Text('Known People${_persons.isNotEmpty ? " (${_persons.length})" : ""}'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: AppColors.greyLight),
+            tooltip: 'Enroll / Reset Sample Profile',
+            onPressed: _resetOrEnrollSample,
+          ),
           IconButton(
             icon: const Icon(Icons.person_add, color: AppColors.yellow),
             tooltip: 'Add Person',
@@ -128,21 +139,32 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
           style: TextStyle(color: AppColors.white, fontSize: 18, fontWeight: FontWeight.w600)),
         const SizedBox(height: 8),
         const Text(
-          'Add people so NavEye can recognise\nand announce their name.',
+          'Add people so Veyra can recognise\nand announce their name.',
           textAlign: TextAlign.center,
           style: TextStyle(color: AppColors.grey, fontSize: 14, height: 1.5),
         ),
         const SizedBox(height: 32),
         ElevatedButton.icon(
+          onPressed: _resetOrEnrollSample,
+          icon: const Icon(Icons.download, size: 18),
+          label: const Text('Enroll Sample Profile (Loki)', style: TextStyle(fontWeight: FontWeight.w700)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.yellow, foregroundColor: Colors.black,
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
           onPressed: () async {
             await Navigator.pushNamed(context, AppRoutes.peopleCapture);
             _loadPersons();
           },
-          icon: const Icon(Icons.person_add, size: 18),
-          label: const Text('Add Person', style: TextStyle(fontWeight: FontWeight.w700)),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.yellow, foregroundColor: Colors.black,
-            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+          icon: const Icon(Icons.person_add, size: 18, color: AppColors.white),
+          label: const Text('Capture New Person', style: TextStyle(fontWeight: FontWeight.w700, color: AppColors.white)),
+          style: OutlinedButton.styleFrom(
+            side: const BorderSide(color: AppColors.grey),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
         ),
@@ -156,12 +178,25 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
       itemCount: _persons.length,
       itemBuilder: (_, i) {
         final p = _persons[i];
+        final refCount = p.referenceImages.isNotEmpty
+            ? p.referenceImages.length
+            : (p.embedding.length ~/ 512);
+        final locText = p.locationName != null && p.locationName!.isNotEmpty
+            ? ' • ${p.locationName}'
+            : '';
+        final timeStr = '${p.createdAt.hour.toString().padLeft(2, '0')}:${p.createdAt.minute.toString().padLeft(2, '0')}';
+
         return Container(
           margin: const EdgeInsets.only(bottom: 12),
           decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(12)),
           child: ListTile(
             contentPadding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-            onTap: () => _tts.speakNow('${p.name}, added ${p.createdAt.day} ${_month(p.createdAt.month)} ${p.createdAt.year}'),
+            onTap: () {
+              final locSpoken = p.locationName != null && p.locationName!.isNotEmpty
+                  ? ', இடம் ${p.locationName}'
+                  : '';
+              _tts.speakNow('${p.name}, பதிவு செய்யப்பட்டவர்$locSpoken. $refCount புகைப்படங்கள் உள்ளன.');
+            },
             leading: Container(
               width: 52, height: 52,
               decoration: BoxDecoration(
@@ -183,15 +218,21 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
               style: const TextStyle(color: AppColors.white, fontSize: 16, fontWeight: FontWeight.w600)),
             subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(
-                'Added ${p.createdAt.day} ${_month(p.createdAt.month)} ${p.createdAt.year}',
+                'Registered ${p.createdAt.day} ${_month(p.createdAt.month)} ${p.createdAt.year}, $timeStr$locText',
                 style: const TextStyle(color: AppColors.grey, fontSize: 12),
               ),
-              if (p.embedding.isNotEmpty)
-                const Text('Face recognised ✓',
-                  style: TextStyle(color: AppColors.green, fontSize: 11)),
-              if (p.embedding.isEmpty)
-                const Text('Face not yet processed',
-                  style: TextStyle(color: AppColors.grey, fontSize: 11)),
+              const SizedBox(height: 2),
+              Row(children: [
+                if (p.embedding.isNotEmpty) ...[
+                  const Text('Face recognised ✓',
+                    style: TextStyle(color: AppColors.green, fontSize: 11, fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 8),
+                  Text('($refCount photos)',
+                    style: const TextStyle(color: AppColors.greyLight, fontSize: 11)),
+                ] else
+                  const Text('Face not yet processed',
+                    style: TextStyle(color: AppColors.grey, fontSize: 11)),
+              ]),
             ]),
             trailing: IconButton(
               icon: const Icon(Icons.delete_outline, color: AppColors.danger, size: 22),
@@ -208,3 +249,4 @@ class _PeopleListScreenState extends State<PeopleListScreen> {
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
   ][m];
 }
+

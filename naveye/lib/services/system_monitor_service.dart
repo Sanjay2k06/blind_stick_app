@@ -35,11 +35,11 @@ class SystemMonitorService {
       if (_wasOnline && !online) {
         _wasOnline = false;
         debugPrint('SystemMonitor: connectivity lost');
-        await _tts.announce('Internet connection lost. Using offline mode.');
+        await _tts.announce('இணைய இணைப்பு துண்டிக்கப்பட்டது. ஆஃப்லைன் பயன்முறை பயன்படுத்தப்படுகிறது.');
       } else if (!_wasOnline && online) {
         _wasOnline = true;
         debugPrint('SystemMonitor: connectivity restored');
-        await _tts.announce('Internet connection restored.');
+        await _tts.announce('இணைய இணைப்பு மீண்டும் கிடைத்தது.');
       }
     });
 
@@ -65,12 +65,12 @@ class SystemMonitorService {
           _warned10 = true;
           debugPrint('SystemMonitor: battery critical $level%');
           await _tts.speakNow(
-              'Warning: Battery at $level percent. Please charge immediately.');
+              'எச்சரிக்கை: பேட்டரி $level சதவீதம் மட்டுமே உள்ளது. உடனே சார்ஜ் செய்யவும்.');
         } else if (level <= 20 && !_warned20) {
           _warned20 = true;
           debugPrint('SystemMonitor: battery low $level%');
           await _tts.announce(
-              'Battery low: $level percent remaining. Please charge soon.');
+              'பேட்டரி குறைவாக உள்ளது: $level சதவீதம். விரைவில் சார்ஜ் செய்யவும்.');
         }
       } catch (e) {
         debugPrint('SystemMonitor battery error: $e');
@@ -85,12 +85,12 @@ class SystemMonitorService {
     try {
       final level = await _battery.batteryLevel;
       final state = await _battery.batteryState;
-      final stateStr = state == BatteryState.charging ? ', charging'
-                     : state == BatteryState.full     ? ', fully charged'
+      final stateStr = state == BatteryState.charging ? ', சார்ஜ் ஆகிறது'
+                     : state == BatteryState.full     ? ', முழு சார்ஜ் உள்ளது'
                      : '';
-      await _tts.speakNow('Battery is at $level percent$stateStr.');
+      await _tts.speakNow('பேட்டரி $level சதவீதம் உள்ளது$stateStr.');
     } catch (_) {
-      await _tts.speakNow('Could not read battery level.');
+      await _tts.speakNow('பேட்டரி அளவை அறிய முடியவில்லை.');
     }
   }
 

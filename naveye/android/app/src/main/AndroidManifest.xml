@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
     <uses-permission android:name="android.permission.INTERNET"/>
@@ -27,7 +29,7 @@
     <uses-feature android:name="android.hardware.microphone"   android:required="false"/>
 
     <application
-        android:label="NavEye"
+        android:label="Veyra"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
 
@@ -63,14 +65,7 @@
             android:foregroundServiceType="camera|microphone"
             android:stopWithTask="false"
             android:exported="false"/>
-        <!-- flutter_foreground_task: restart receiver (auto-restart on boot) -->
-        <receiver
-            android:name="com.pravera.flutter_foreground_task.receiver.TaskRestartReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-            </intent-filter>
-        </receiver>
+        <!-- flutter_foreground_task: restart receiver is automatically registered by flutter_foreground_task plugin -->
     </application>
 
     <queries>

@@ -18,8 +18,8 @@ class NavEyeForegroundService {
     FlutterForegroundTask.init(
       androidNotificationOptions: AndroidNotificationOptions(
         channelId:          'naveye_detection',
-        channelName:        'NavEye Detection',
-        channelDescription: 'NavEye obstacle detection is running in the background',
+        channelName:        'Veyra Detection',
+        channelDescription: 'Veyra obstacle detection is running in the background',
         channelImportance:  NotificationChannelImportance.LOW,
         priority:           NotificationPriority.LOW,
       ),
@@ -42,7 +42,7 @@ class NavEyeForegroundService {
       if (await FlutterForegroundTask.isRunningService) return;
       await FlutterForegroundTask.startService(
         serviceId:         256,
-        notificationTitle: 'NavEye Active',
+        notificationTitle: 'Veyra Active',
         notificationText:  'Obstacle detection is running',
       );
       debugPrint('NavEyeForegroundService: started');
@@ -59,7 +59,7 @@ class NavEyeForegroundService {
     try {
       if (!await FlutterForegroundTask.isRunningService) return;
       await FlutterForegroundTask.updateService(
-        notificationTitle: 'NavEye Active',
+        notificationTitle: 'Veyra Active',
         notificationText:  '$label detected — $distance',
       );
     } catch (_) {}
@@ -70,7 +70,7 @@ class NavEyeForegroundService {
     try {
       if (!await FlutterForegroundTask.isRunningService) return;
       await FlutterForegroundTask.updateService(
-        notificationTitle: 'NavEye Active',
+        notificationTitle: 'Veyra Active',
         notificationText:  'Scanning for obstacles...',
       );
     } catch (_) {}

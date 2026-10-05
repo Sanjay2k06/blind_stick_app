@@ -42,9 +42,9 @@ class _PeopleCaptureScreenState extends State<PeopleCaptureScreen> {
   ];
 
   static const _ttsInstructions = [
-    'Step 1 of 3. Position the face in the oval and look straight ahead. Auto-capture in 5 seconds.',
-    'Step 2 of 3. Now turn slightly to the left. Auto-capture in 5 seconds.',
-    'Step 3 of 3. Now turn slightly to the right. Auto-capture in 5 seconds.',
+    'படி 1: முகத்தை நேராக வைத்துப் பார்க்கவும். ஐந்து வினாடிகளில் படம் எடுக்கப்படும்.',
+    'படி 2: இப்போது லேசாக இடப்பக்கம் திரும்பவும். ஐந்து வினாடிகளில் படம் எடுக்கப்படும்.',
+    'படி 3: இப்போது லேசாக வலப்பக்கம் திரும்பவும். ஐந்து வினாடிகளில் படம் எடுக்கப்படும்.',
   ];
 
   @override
@@ -59,7 +59,7 @@ class _PeopleCaptureScreenState extends State<PeopleCaptureScreen> {
     if (!mounted) return;
     if (status.isDenied || status.isPermanentlyDenied) {
       setState(() => _errorMsg = 'Camera permission denied.\nGo to App Settings to allow camera.');
-      await _tts.speakNow('Camera permission denied. Please open App Settings and allow camera access.');
+      await _tts.speakNow('கேமரா அனுமதி மறுக்கப்பட்டது. அமைப்புகளுக்குச் சென்று கேமரா அணுகலை அனுமதிக்கவும்.');
       return;
     }
     _cameras = await availableCameras();
@@ -95,7 +95,7 @@ class _PeopleCaptureScreenState extends State<PeopleCaptureScreen> {
       debugPrint('Camera init error: $e');
       if (mounted) {
         setState(() => _errorMsg = 'Could not open camera.\nTap Try Again.');
-        await _tts.speakNow('Camera failed to open. Tap Try Again.');
+        await _tts.speakNow('கேமராவைத் திறக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
       }
     }
   }
@@ -136,13 +136,13 @@ class _PeopleCaptureScreenState extends State<PeopleCaptureScreen> {
       } else {
         // All 3 captured — go to review
         setState(() {});
-        await _tts.speakNow('All 3 photos taken. Tap Save to continue or Retake to start again.');
+        await _tts.speakNow('3 புகைப்படங்களும் எடுக்கப்பட்டன. சேமிக்க தொடரவும் அல்லது மீண்டும் எடுக்கவும்.');
       }
     } catch (e) {
       debugPrint('Capture error: $e');
       if (mounted) {
         setState(() => _capturing = false);
-        await _tts.speakNow('Photo failed. Trying again.');
+        await _tts.speakNow('புகைப்படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கிறது.');
         _startCountdown();
       }
     }
