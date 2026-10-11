@@ -237,6 +237,12 @@ class _MainAIScreenState extends State<MainAIScreen>
   late Animation<double>   _pulseAnim;
   late final StartupFlowManager _startupFlowManager;
 
+  // ── OLED Currency HUD & State ─────────────────────────────────────────────
+  CurrencyResult? _activeCurrencyResult;
+  bool _showCurrencyOledOverlay = false;
+  bool _isCurrencyScanning = false;
+  Timer? _currencyDismissTimer;
+
   // ─────────────────────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -788,44 +794,7 @@ class _MainAIScreenState extends State<MainAIScreen>
         }
         break;
       case VoiceCommand.identifyCurrency:
-        await _tts.speakAndWait('ரூபாய் நோட்டை சரிபார்க்கிறேன்.');
-        img.Image? currFrame = _lastFrame;
-        if (currFrame == null && _cam != null && _cameraReady && !_isStreaming) {
-          try {
-            final xFile = await _cam!.takePicture();
-            final bytes = await File(xFile.path).readAsBytes();
-            currFrame = img.decodeImage(bytes);
-            await File(xFile.path).delete();
-          } catch (e) {
-            debugPrint('Currency capture error: $e');
-          }
-        }
-        if (currFrame != null) {
-          String? ocrText;
-          try {
-            final tmpPath = '${Directory.systemTemp.path}/curr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
-            final encoded = img.encodeJpg(currFrame, quality: 85);
-            final tmpFile = File(tmpPath);
-            await tmpFile.writeAsBytes(encoded);
-            final ocrRes = await OcrService.instance.processImageFile(tmpPath);
-            if (ocrRes.hasText) {
-              ocrText = ocrRes.rawText;
-            }
-            if (await tmpFile.exists()) {
-              await tmpFile.delete();
-            }
-          } catch (e) {
-            debugPrint('Currency OCR helper error: $e');
-          }
-
-          final currResult = CurrencyRecognitionService.instance.recognize(
-            image: currFrame,
-            ocrText: ocrText,
-          );
-          await _tts.speakAndWait(currResult.spokenTextTa);
-        } else {
-          await _tts.speakAndWait('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
-        }
+        await _identifyCurrencyNow();
         break;
       case VoiceCommand.readText:
         await _tts.speakAndWait('வாசகம் படிக்கப்படுகிறது.');
@@ -980,6 +949,97 @@ class _MainAIScreenState extends State<MainAIScreen>
     }
   }
 
+  /// High-accuracy currency identifier with multilingual speech announcement and OLED HUD
+  Future<void> _identifyCurrencyNow() async {
+    if (_isCurrencyScanning) return;
+    HapticFeedback.heavyImpact();
+
+    setState(() {
+      _isCurrencyScanning = true;
+      _showCurrencyOledOverlay = true;
+    });
+
+    await _tts.speakAndWait('ரூபாய் நோட்டை சரிபார்க்கிறேன். கேமராவில் காட்டவும்.');
+
+    img.Image? currFrame = _lastFrame;
+    if (_cam != null && _cameraReady) {
+      try {
+        final xFile = await _cam!.takePicture();
+        final bytes = await File(xFile.path).readAsBytes();
+        currFrame = img.decodeImage(bytes);
+        await File(xFile.path).delete();
+      } catch (e) {
+        debugPrint('Currency high-res capture fallback to last frame: $e');
+      }
+    }
+
+    if (currFrame != null) {
+      String? ocrText;
+      try {
+        final tmpPath = '${Directory.systemTemp.path}/curr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
+        final encoded = img.encodeJpg(currFrame, quality: 85);
+        final tmpFile = File(tmpPath);
+        await tmpFile.writeAsBytes(encoded);
+        final ocrRes = await OcrService.instance.processImageFile(tmpPath);
+        if (ocrRes.hasText) {
+          ocrText = ocrRes.rawText;
+        }
+        if (await tmpFile.exists()) {
+          await tmpFile.delete();
+        }
+      } catch (e) {
+        debugPrint('Currency OCR helper error: $e');
+      }
+
+      final currResult = CurrencyRecognitionService.instance.recognize(
+        image: currFrame,
+        ocrText: ocrText,
+        addToWallet: true,
+      );
+
+      if (mounted) {
+        setState(() {
+          _activeCurrencyResult = currResult;
+          _isCurrencyScanning = false;
+        });
+      }
+
+      if (currResult.isConfident && currResult.value > 0) {
+        // Tactile vibration pattern for blind user perception
+        if (_vibrationEnabled && await Vibration.hasVibrator() == true) {
+          Vibration.vibrate(pattern: currResult.hapticPattern);
+        }
+
+        // Announcement answering: "says how much he/she have"
+        final walletTotal = CurrencyRecognitionService.instance.walletBalance;
+        final totalText = walletTotal > currResult.value
+            ? 'மொத்த பணம் $walletTotal ரூபாய்.'
+            : '';
+        final announcement = '${currResult.userAmountTa} ${currResult.spokenTextTa}. $totalText';
+        await _tts.speakAndWait(announcement);
+      } else {
+        await _tts.speakAndWait(currResult.spokenTextTa);
+      }
+
+      // Keep OLED display visible, auto-dismiss after 10 seconds if idle
+      _currencyDismissTimer?.cancel();
+      _currencyDismissTimer = Timer(const Duration(seconds: 10), () {
+        if (mounted) {
+          setState(() {
+            _showCurrencyOledOverlay = false;
+          });
+        }
+      });
+    } else {
+      if (mounted) {
+        setState(() {
+          _isCurrencyScanning = false;
+        });
+      }
+      await _tts.speakAndWait('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+    }
+  }
+
   // ── People menu ───────────────────────────────────────────────────────────
   void _showPeopleMenu() {
     showModalBottomSheet(
@@ -1088,6 +1148,7 @@ class _MainAIScreenState extends State<MainAIScreen>
     WidgetsBinding.instance.removeObserver(this);
     _startupFlowManager.dispose();
     _voiceTimeout?.cancel();
+    _currencyDismissTimer?.cancel();
     _pulse.dispose();
     _monitor?.dispose();
     unawaited(NavEyeForegroundService.stop()); // fire-and-forget stop
@@ -1166,6 +1227,18 @@ class _MainAIScreenState extends State<MainAIScreen>
                     });
                   },
                 ),
+                const SizedBox(width: 10),
+                IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  icon: const Icon(
+                    Icons.payments_outlined,
+                    color: Colors.white,
+                    size: 21,
+                  ),
+                  tooltip: 'பணம் சரிபார்க்க (₹ Currency)',
+                  onPressed: _identifyCurrencyNow,
+                ),
               ]),
             ),
           ),
@@ -1203,6 +1276,7 @@ class _MainAIScreenState extends State<MainAIScreen>
           //   Double tap    → activate voice command
           //   Long press    → repeat last announcement
           //   Swipe up      → identify person in front
+          //   Swipe down    → check banknote / how much money you have
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -1225,6 +1299,10 @@ class _MainAIScreenState extends State<MainAIScreen>
                   if ((details.primaryVelocity ?? 0) < -400) {
                     HapticFeedback.mediumImpact();
                     _handleCmd(VoiceCommand.whoIsThis);
+                  } else if ((details.primaryVelocity ?? 0) > 400) {
+                    // Swipe down (positive velocity = downward) -> OLED Currency Scanner
+                    HapticFeedback.heavyImpact();
+                    _identifyCurrencyNow();
                   }
                 },
                 child: AnimatedContainer(
@@ -1308,6 +1386,8 @@ class _MainAIScreenState extends State<MainAIScreen>
                                     _GestureHint(icon: Icons.replay,       label: 'அழுத்திப் பிடிக்க',  hint: 'மீண்டும் கேட்க'),
                                     const SizedBox(height: 4),
                                     _GestureHint(icon: Icons.swipe_up,     label: 'மேலே ஸ்வைப்',    hint: 'யார் என்று பார்க்க'),
+                                    const SizedBox(height: 4),
+                                    _GestureHint(icon: Icons.payments,     label: 'கீழே ஸ்வைப்',    hint: 'பணம் சரிபார்க்க (₹ Currency)'),
                                   ],
                                 ),
                               ),
@@ -1773,11 +1853,289 @@ class _MainAIScreenState extends State<MainAIScreen>
           ),
         ]),
       ),
+      if (_showCurrencyOledOverlay) _buildCurrencyOledOverlay(),
       CalmStartupOverlay(flowManager: _startupFlowManager),
     ],
   ),
 );
 }
+
+  Widget _buildCurrencyOledOverlay() {
+    final res = _activeCurrencyResult;
+    final isScanning = _isCurrencyScanning;
+    final walletBal = CurrencyRecognitionService.instance.walletBalance;
+
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withValues(alpha: 0.94),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 32),
+        child: SafeArea(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // Top dismiss / close bar
+              Align(
+                alignment: Alignment.topRight,
+                child: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                  tooltip: 'மூடு (Close)',
+                  onPressed: () {
+                    setState(() => _showCurrencyOledOverlay = false);
+                  },
+                ),
+              ),
+
+              const Spacer(),
+
+              // OLED Main Card
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: Colors.white, width: 3.0),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      blurRadius: 20,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+                child: isScanning
+                    ? const Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 50,
+                            height: 50,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 3.5,
+                            ),
+                          ),
+                          SizedBox(height: 20),
+                          Text(
+                            'ரூபாய் நோட்டு சரிபார்க்கப்படுகிறது...',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          SizedBox(height: 8),
+                          Text(
+                            'Checking banknote against trained models...',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: AppColors.grey, fontSize: 13),
+                          ),
+                        ],
+                      )
+                    : Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Header badge
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  res != null && res.isConfident && res.value > 0
+                                      ? Icons.check_circle
+                                      : Icons.info_outline,
+                                  color: Colors.black,
+                                  size: 16,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  res != null && res.isConfident && res.value > 0
+                                      ? 'கண்டறியப்பட்டது (DETECTED)'
+                                      : 'தெளிவாக இல்லை (RETRY)',
+                                  style: const TextStyle(
+                                    color: Colors.black,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 0.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          const SizedBox(height: 18),
+
+                          // Large Hero Denomination
+                          if (res != null && res.value > 0) ...[
+                            Text(
+                              '₹${res.value}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 60,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              res.spokenTextTa,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 22,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              res.spokenTextEn,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: AppColors.greyLight,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: AppColors.inputBg,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.white.withValues(alpha: 0.4)),
+                              ),
+                              child: Column(
+                                children: [
+                                  Text(
+                                    res.userAmountTa,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    res.userAmountEn,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: AppColors.grey,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (res.matchedModel.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              Text(
+                                'வகை: ${res.matchedModel}',
+                                style: const TextStyle(color: AppColors.grey, fontSize: 11),
+                              ),
+                            ],
+                          ] else ...[
+                            const Icon(Icons.help_outline, color: Colors.white, size: 54),
+                            const SizedBox(height: 16),
+                            const Text(
+                              'ரூபாய் நோட்டு தெளிவாகத் தெரியவில்லை',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'கேமராவிற்கு அருகில் நேராகக் காட்டவும்.\nHold banknote steady in front of camera.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: AppColors.grey, fontSize: 13, height: 1.4),
+                            ),
+                          ],
+
+                          const SizedBox(height: 20),
+
+                          // Total wallet accumulator
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.black,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white, width: 1.5),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'மொத்த பணம் (Total):',
+                                  style: TextStyle(color: AppColors.greyLight, fontSize: 13),
+                                ),
+                                Text(
+                                  '₹$walletBal',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+
+              const Spacer(),
+
+              // Action Buttons Row
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white, width: 1.8),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () {
+                        CurrencyRecognitionService.instance.resetWallet();
+                        setState(() {});
+                        _tts.speakNow('பணக் கணக்கு மீட்டமைக்கப்பட்டது.');
+                      },
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('மீட்டமை', style: TextStyle(fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: _identifyCurrencyNow,
+                      icon: const Icon(Icons.camera_alt, size: 18),
+                      label: const Text('மீண்டும் ஸ்கேன்', style: TextStyle(fontWeight: FontWeight.w900)),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _buildDebugOverlay() {
     return Positioned(

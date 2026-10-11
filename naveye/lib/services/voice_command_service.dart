@@ -218,8 +218,14 @@ class VoiceCommandService {
     if (_has(lower, ['repeat', 'again', 'say again', 'what was that', 'pardon', 'what did', 'மீண்டும்', 'திரும்ப'])) {
       return VoiceCommand.repeat;
     }
-    // 3. Assistive Utilities
-    if (_has(lower, ['பணம்', 'ரூபாய்', 'நோட்டு', 'காசு', 'currency', 'money', 'rupee', 'banknote', 'cash'])) {
+    // 3. Assistive Utilities — Currency / Money Identifier
+    if (_has(lower, [
+      'பணம்', 'ரூபாய்', 'நோட்டு', 'காசு', 'பணம் எவ்வளவு', 'என்னிடம் எவ்வளவு பணம்',
+      'எவ்வளவு பணம்', 'காசு எவ்வளவு', 'நோட்டு என்ன', 'ரூபாய் எவ்வளவு',
+      'currency', 'money', 'rupee', 'banknote', 'cash', 'how much money',
+      'how much cash', 'how much do i have', 'how much have i', 'count money',
+      'check money', 'check currency', 'identify currency', 'read money', 'my money'
+    ])) {
       return VoiceCommand.identifyCurrency;
     }
     if (_has(lower, ['படி', 'எழுத்து', 'பலகை', 'வாசி', 'அறிவிப்பு', 'read', 'text', 'signboard', 'sign', 'ocr'])) {
