@@ -74,5 +74,48 @@ void main() {
       service.resetWallet();
       expect(service.walletBalance, equals(0));
     });
+
+    test('recognizeLiveStream classifies all dataset banknotes confidently', () {
+      final expectedMap = {
+        '100rs_front_back_new.jpg': InrDenomination.oneHundred,
+        '100rs_model1_front.jpg': InrDenomination.oneHundred,
+        '10rs_model1_back.jpg': InrDenomination.ten,
+        '10rs_model1_front.jpg': InrDenomination.ten,
+        '10rs_model2_back.jpg': InrDenomination.ten,
+        '10rs_model2_front.jpg': InrDenomination.ten,
+        '2000_front_back.jpg': InrDenomination.twoThousand,
+        '200_front_back.jpg': InrDenomination.twoHundred,
+        '20rs_model1_frontend.jpg': InrDenomination.twenty,
+        '20rs_model2_back.jpg': InrDenomination.twenty,
+        '20rs_model2_frontend.jpg': InrDenomination.twenty,
+        '500rs_image_front_back.jpg': InrDenomination.fiveHundred,
+      };
+
+      for (final entry in expectedMap.entries) {
+        final f = File('money_image/${entry.key}');
+        final bytes = f.readAsBytesSync();
+        final decoded = img.decodeImage(bytes)!;
+
+        final res = service.recognizeLiveStream(decoded);
+        expect(res.denomination, equals(entry.value));
+        expect(res.isConfident, isTrue);
+        expect(res.confidence, greaterThanOrEqualTo(0.70));
+      }
+    });
+
+    test('recognizeLiveStream correctly rejects non-banknote blank or ambient images', () {
+      // Solid black image
+      final blackImg = img.Image(width: 200, height: 100);
+      expect(service.recognizeLiveStream(blackImg).denomination, equals(InrDenomination.unknown));
+
+      // Neutral gray image
+      final grayImg = img.Image(width: 200, height: 100);
+      for (int y = 0; y < 100; y++) {
+        for (int x = 0; x < 200; x++) {
+          grayImg.setPixelRgb(x, y, 128, 128, 128);
+        }
+      }
+      expect(service.recognizeLiveStream(grayImg).denomination, equals(InrDenomination.unknown));
+    });
   });
 }

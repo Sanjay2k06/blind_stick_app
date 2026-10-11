@@ -514,6 +514,18 @@ class CurrencyRecognitionService {
     return CurrencyResult.notFound;
   }
 
+  /// Real-time continuous stream detection optimized for live camera frames.
+  /// Strict confidence filtering ensures natural environments do not falsely trigger.
+  CurrencyResult recognizeLiveStream(img.Image image) {
+    final visual = _matchFromVisual(image);
+    if (visual.denomination != InrDenomination.unknown &&
+        visual.isConfident &&
+        visual.confidence >= 0.70) {
+      return visual;
+    }
+    return CurrencyResult.notFound;
+  }
+
   /// Multilingual OCR token and numeral parser (English + Devanagari + Tamil)
   InrDenomination _matchFromText(String text) {
     final lower = text.toLowerCase();
@@ -564,6 +576,9 @@ class CurrencyRecognitionService {
     double centerR = 0, centerG = 0, centerB = 0;
     int centerCount = 0;
 
+    double lumSum = 0;
+    double lumSumSq = 0;
+
     // Adaptive step to sample ~1200 pixels evenly without CPU lag
     final step = max(2, min(w, h) ~/ 50);
 
@@ -574,6 +589,10 @@ class CurrencyRecognitionService {
         globalG += p.g;
         globalB += p.b;
         globalCount++;
+
+        final lum = (p.r + p.g + p.b) / 3.0;
+        lumSum += lum;
+        lumSumSq += lum * lum;
 
         // Is pixel inside center 50% box?
         if (x >= cx - rx && x < cx + rx && y >= cy - ry && y < cy + ry) {
@@ -586,6 +605,13 @@ class CurrencyRecognitionService {
     }
 
     if (globalCount == 0 || centerCount == 0) return CurrencyResult.notFound;
+
+    // Reject uniform flat blank / synthetic single-color images (variance near 0)
+    final meanLum = lumSum / globalCount;
+    final variance = (lumSumSq / globalCount) - (meanLum * meanLum);
+    if (variance < 20.0) {
+      return CurrencyResult.notFound;
+    }
 
     final avgGR = globalR / globalCount;
     final avgGG = globalG / globalCount;
@@ -745,6 +771,9 @@ class CurrencyRecognitionService {
     }
 
     if (domainMatch != InrDenomination.unknown) {
+      if (bestDist > 1.35) {
+        return CurrencyResult.notFound;
+      }
       return CurrencyResult(
         denomination: domainMatch,
         value: _values[domainMatch]!,

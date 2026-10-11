@@ -242,6 +242,12 @@ class _MainAIScreenState extends State<MainAIScreen>
   bool _showCurrencyOledOverlay = false;
   bool _isCurrencyScanning = false;
   Timer? _currencyDismissTimer;
+  DateTime _lastCurrencyAutoCheck = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastCurrencyAnnouncedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  InrDenomination _lastCandidateDenom = InrDenomination.unknown;
+  InrDenomination _lastAnnouncedDenom = InrDenomination.unknown;
+  int _currencyStabilityCount = 0;
+  bool _autoCurrencyDetectionEnabled = true;
 
   // ─────────────────────────────────────────────────────────────────────────
   @override
@@ -287,6 +293,7 @@ class _MainAIScreenState extends State<MainAIScreen>
         (e) => debugPrint('SystemMonitor start error: $e')));
     final prefs = await SharedPreferences.getInstance();
     _vibrationEnabled = prefs.getBool('vibration') ?? true;
+    _autoCurrencyDetectionEnabled = prefs.getBool('auto_currency_detection') ?? true;
 
     if (mounted) {
       setState(() {
@@ -528,6 +535,76 @@ class _MainAIScreenState extends State<MainAIScreen>
           } catch (e) {
             debugPrint('Auto-torch off error: $e');
           }
+        }
+      }
+
+      // ── Step 0: Real-Time Automatic Currency Detection ────────────────────
+      if (_autoCurrencyDetectionEnabled &&
+          !_isCurrencyScanning &&
+          !_voiceActive &&
+          !_detectionPausedForVoice &&
+          now.difference(_lastCurrencyAutoCheck).inMilliseconds >= 350) {
+        _lastCurrencyAutoCheck = now;
+        final curr = CurrencyRecognitionService.instance.recognizeLiveStream(image);
+        if (curr.isConfident && curr.value > 0) {
+          if (curr.denomination == _lastCandidateDenom) {
+            _currencyStabilityCount++;
+          } else {
+            _lastCandidateDenom = curr.denomination;
+            _currencyStabilityCount = 1;
+          }
+
+          // Confirmed across at least 2 consecutive checks (~700ms temporal stability)
+          if (_currencyStabilityCount >= 2) {
+            final secondsSinceLastAnnouncement =
+                now.difference(_lastCurrencyAnnouncedAt).inSeconds;
+            final isNewDenom = curr.denomination != _lastAnnouncedDenom;
+
+            // Announce if new note, or if same note after at least 6s cooldown
+            if (isNewDenom || secondsSinceLastAnnouncement >= 6) {
+              _lastAnnouncedDenom = curr.denomination;
+              _lastCurrencyAnnouncedAt = now;
+
+              // Automatically add to session wallet accumulator
+              CurrencyRecognitionService.instance.addNoteToWallet(curr.value);
+
+              // Update HUD & state
+              if (mounted) {
+                setState(() {
+                  _activeCurrencyResult = curr;
+                  _showCurrencyOledOverlay = true;
+                });
+              }
+
+              // Haptic tactile pulse pattern for visually impaired perception
+              if (_vibrationEnabled && await Vibration.hasVibrator() == true) {
+                Vibration.vibrate(pattern: curr.hapticPattern);
+              }
+
+              // Multilingual voice announcement
+              final walletTotal = CurrencyRecognitionService.instance.walletBalance;
+              final totalText = walletTotal > curr.value
+                  ? 'மொத்த பணம் $walletTotal ரூபாய்.'
+                  : '';
+              final announcement =
+                  '${curr.userAmountTa} ${curr.spokenTextTa}. $totalText';
+              await _tts.speakNow(announcement);
+
+              // Auto-dismiss OLED HUD overlay after 8 seconds
+              _currencyDismissTimer?.cancel();
+              _currencyDismissTimer = Timer(const Duration(seconds: 8), () {
+                if (mounted) {
+                  setState(() {
+                    _showCurrencyOledOverlay = false;
+                  });
+                }
+              });
+            }
+          }
+        } else {
+          // Reset stability tracker when note leaves focus zone
+          _currencyStabilityCount = 0;
+          _lastCandidateDenom = InrDenomination.unknown;
         }
       }
 
@@ -1829,8 +1906,10 @@ class _MainAIScreenState extends State<MainAIScreen>
                     await _tts.init();
                     final p = await SharedPreferences.getInstance();
                     if (mounted) {
-                      setState(() =>
-                          _vibrationEnabled = p.getBool('vibration') ?? true);
+                      setState(() {
+                        _vibrationEnabled = p.getBool('vibration') ?? true;
+                        _autoCurrencyDetectionEnabled = p.getBool('auto_currency_detection') ?? true;
+                      });
                     }
                   },
                   child: Container(

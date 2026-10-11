@@ -15,6 +15,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _vol      = 'Medium';
   String _ai       = 'Medium';
   bool   _vib      = true;
+  bool   _autoCurrency = true;
   String _userName = '';
 
   final TtsService _tts = TtsService();
@@ -33,6 +34,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _vol      = p.getString('voice_volume')   ?? 'Medium';
       _vib      = p.getBool('vibration')        ?? true;
+      _autoCurrency = p.getBool('auto_currency_detection') ?? true;
       _ai       = p.getString('ai_sensitivity') ?? 'Medium';
       _userName = p.getString('user_name')      ?? '';
     });
@@ -43,6 +45,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final p = await SharedPreferences.getInstance();
     await p.setString('voice_volume',   _vol);
     await p.setBool('vibration',        _vib);
+    await p.setBool('auto_currency_detection', _autoCurrency);
     await p.setString('ai_sensitivity', _ai);
     await _tts.init();
     await _tts.speakNow(_tts.isTamil ? 'அமைப்புகள் சேமிக்கப்பட்டன.' : 'Settings saved.');
@@ -137,6 +140,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
             Switch(
                 value: _vib,
                 onChanged: (v) => setState(() => _vib = v),
+                activeThumbColor: AppColors.green),
+          ])),
+
+          // ── Auto Currency Detection ──────────────────────────────────────────
+          _card(Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            const Expanded(
+              child: Row(children: [
+                Icon(Icons.currency_rupee, color: AppColors.greyLight, size: 18),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Auto Currency Detection',
+                          style: TextStyle(color: AppColors.white, fontSize: 14)),
+                      Text('Detects INR banknotes in live camera automatically',
+                          style: TextStyle(color: AppColors.grey, fontSize: 11)),
+                    ],
+                  ),
+                ),
+              ]),
+            ),
+            Switch(
+                value: _autoCurrency,
+                onChanged: (v) => setState(() => _autoCurrency = v),
                 activeThumbColor: AppColors.green),
           ])),
 
