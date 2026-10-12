@@ -116,6 +116,54 @@ void main() {
         }
       }
       expect(service.recognizeLiveStream(grayImg).denomination, equals(InrDenomination.unknown));
+
+      // Concrete road / grey floor
+      final roadImg = img.Image(width: 320, height: 240);
+      for (int y = 0; y < 240; y++) {
+        for (int x = 0; x < 320; x++) {
+          final n = ((x + y * 2) % 25) - 12;
+          roadImg.setPixelRgb(x, y, (140 + n).clamp(0, 255), (138 + n).clamp(0, 255), (135 + n).clamp(0, 255));
+        }
+      }
+      final roadLive = service.recognizeLiveStream(roadImg);
+      expect(roadLive.denomination, equals(InrDenomination.unknown));
+      expect(roadLive.isConfident, isFalse);
+
+      final roadSingle = service.recognize(image: roadImg);
+      expect(roadSingle.denomination, equals(InrDenomination.unknown));
+      expect(roadSingle.isConfident, isFalse);
+
+      // Wooden desk / tabletop
+      final deskImg = img.Image(width: 320, height: 240);
+      for (int y = 0; y < 240; y++) {
+        for (int x = 0; x < 320; x++) {
+          final n = (x % 15) - 7;
+          deskImg.setPixelRgb(x, y, (180 + n).clamp(0, 255), (145 + (n * 0.8).toInt()).clamp(0, 255), (115 + (n * 0.6).toInt()).clamp(0, 255));
+        }
+      }
+      final deskLive = service.recognizeLiveStream(deskImg);
+      expect(deskLive.denomination, equals(InrDenomination.unknown));
+      expect(deskLive.isConfident, isFalse);
+
+      final deskSingle = service.recognize(image: deskImg);
+      expect(deskSingle.denomination, equals(InrDenomination.unknown));
+      expect(deskSingle.isConfident, isFalse);
+
+      // Warm indoor wall
+      final wallImg = img.Image(width: 320, height: 240);
+      for (int y = 0; y < 240; y++) {
+        for (int x = 0; x < 320; x++) {
+          final n = (x * y) % 20;
+          wallImg.setPixelRgb(x, y, (215 + n).clamp(0, 255), (195 + n).clamp(0, 255), (150 + n).clamp(0, 255));
+        }
+      }
+      final wallLive = service.recognizeLiveStream(wallImg);
+      expect(wallLive.denomination, equals(InrDenomination.unknown));
+      expect(wallLive.isConfident, isFalse);
+
+      final wallSingle = service.recognize(image: wallImg);
+      expect(wallSingle.denomination, equals(InrDenomination.unknown));
+      expect(wallSingle.isConfident, isFalse);
     });
   });
 }

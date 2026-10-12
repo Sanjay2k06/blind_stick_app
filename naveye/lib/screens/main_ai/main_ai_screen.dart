@@ -247,6 +247,7 @@ class _MainAIScreenState extends State<MainAIScreen>
   InrDenomination _lastCandidateDenom = InrDenomination.unknown;
   InrDenomination _lastAnnouncedDenom = InrDenomination.unknown;
   int _currencyStabilityCount = 0;
+  int _currencyClearStreak = 0;
   bool _autoCurrencyDetectionEnabled = true;
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -547,6 +548,9 @@ class _MainAIScreenState extends State<MainAIScreen>
         _lastCurrencyAutoCheck = now;
         final curr = CurrencyRecognitionService.instance.recognizeLiveStream(image);
         if (curr.isConfident && curr.value > 0) {
+          // Reset clear streak since banknote is present in frame
+          _currencyClearStreak = 0;
+
           if (curr.denomination == _lastCandidateDenom) {
             _currencyStabilityCount++;
           } else {
@@ -554,18 +558,17 @@ class _MainAIScreenState extends State<MainAIScreen>
             _currencyStabilityCount = 1;
           }
 
-          // Confirmed across at least 2 consecutive checks (~700ms temporal stability)
-          if (_currencyStabilityCount >= 2) {
-            final secondsSinceLastAnnouncement =
-                now.difference(_lastCurrencyAnnouncedAt).inSeconds;
+          // Confirmed across at least 3 consecutive checks (~1050ms temporal stability)
+          // to ensure a genuine, stable banknote is presented
+          if (_currencyStabilityCount >= 3) {
             final isNewDenom = curr.denomination != _lastAnnouncedDenom;
 
-            // Announce if new note, or if same note after at least 6s cooldown
-            if (isNewDenom || secondsSinceLastAnnouncement >= 6) {
+            // Announce ONLY ONCE per note presentation (do not repeat every few seconds)
+            if (isNewDenom) {
               _lastAnnouncedDenom = curr.denomination;
               _lastCurrencyAnnouncedAt = now;
 
-              // Automatically add to session wallet accumulator
+              // Automatically add to session wallet accumulator ONLY ONCE
               CurrencyRecognitionService.instance.addNoteToWallet(curr.value);
 
               // Update HUD & state
@@ -581,7 +584,7 @@ class _MainAIScreenState extends State<MainAIScreen>
                 Vibration.vibrate(pattern: curr.hapticPattern);
               }
 
-              // Multilingual voice announcement
+              // Multilingual voice announcement - speaks ONLY ONCE
               final walletTotal = CurrencyRecognitionService.instance.walletBalance;
               final totalText = walletTotal > curr.value
                   ? 'மொத்த பணம் $walletTotal ரூபாய்.'
@@ -590,9 +593,9 @@ class _MainAIScreenState extends State<MainAIScreen>
                   '${curr.userAmountTa} ${curr.spokenTextTa}. $totalText';
               await _tts.speakNow(announcement);
 
-              // Auto-dismiss OLED HUD overlay after 8 seconds
+              // Auto-dismiss OLED HUD overlay after 6 seconds
               _currencyDismissTimer?.cancel();
-              _currencyDismissTimer = Timer(const Duration(seconds: 8), () {
+              _currencyDismissTimer = Timer(const Duration(seconds: 6), () {
                 if (mounted) {
                   setState(() {
                     _showCurrencyOledOverlay = false;
@@ -602,9 +605,16 @@ class _MainAIScreenState extends State<MainAIScreen>
             }
           }
         } else {
-          // Reset stability tracker when note leaves focus zone
+          // Note is not shown or has left the camera view
           _currencyStabilityCount = 0;
           _lastCandidateDenom = InrDenomination.unknown;
+          _currencyClearStreak++;
+
+          // Once no banknote has been seen for at least 4 consecutive checks (~1.4s),
+          // reset the announced note memory so a subsequent note can be detected.
+          if (_currencyClearStreak >= 4 && _lastAnnouncedDenom != InrDenomination.unknown) {
+            _lastAnnouncedDenom = InrDenomination.unknown;
+          }
         }
       }
 

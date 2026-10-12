@@ -485,7 +485,9 @@ class CurrencyRecognitionService {
       finalDenom = ocrMatch;
       finalConfidence = 0.95;
       modelName = 'OCR Text';
-    } else if (visualMatch.denomination != InrDenomination.unknown && visualMatch.confidence >= 0.52) {
+    } else if (visualMatch.denomination != InrDenomination.unknown &&
+        visualMatch.isConfident &&
+        visualMatch.confidence >= 0.70) {
       finalDenom = visualMatch.denomination;
       finalConfidence = visualMatch.confidence;
       modelName = visualMatch.matchedModel;
@@ -515,12 +517,12 @@ class CurrencyRecognitionService {
   }
 
   /// Real-time continuous stream detection optimized for live camera frames.
-  /// Strict confidence filtering ensures natural environments do not falsely trigger.
+  /// Strict confidence and structural filtering ensure ambient environments do not falsely trigger.
   CurrencyResult recognizeLiveStream(img.Image image) {
     final visual = _matchFromVisual(image);
     if (visual.denomination != InrDenomination.unknown &&
         visual.isConfident &&
-        visual.confidence >= 0.70) {
+        visual.confidence >= 0.75) {
       return visual;
     }
     return CurrencyResult.notFound;
@@ -578,6 +580,9 @@ class CurrencyRecognitionService {
 
     double lumSum = 0;
     double lumSumSq = 0;
+    double gradSum = 0;
+    int highEdgeCount = 0;
+    int gradCount = 0;
 
     // Adaptive step to sample ~1200 pixels evenly without CPU lag
     final step = max(2, min(w, h) ~/ 50);
@@ -594,6 +599,20 @@ class CurrencyRecognitionService {
         lumSum += lum;
         lumSumSq += lum * lum;
 
+        // Compute high-frequency gradient against adjacent sampled steps
+        if (x + step < w && y + step < h) {
+          final px = image.getPixel(x + step, y);
+          final py = image.getPixel(x, y + step);
+          final lumX = (px.r + px.g + px.b) / 3.0;
+          final lumY = (py.r + py.g + py.b) / 3.0;
+          final grad = (lumX - lum).abs() + (lumY - lum).abs();
+          gradSum += grad;
+          if (grad > 25.0) {
+            highEdgeCount++;
+          }
+          gradCount++;
+        }
+
         // Is pixel inside center 50% box?
         if (x >= cx - rx && x < cx + rx && y >= cy - ry && y < cy + ry) {
           centerR += p.r;
@@ -606,10 +625,17 @@ class CurrencyRecognitionService {
 
     if (globalCount == 0 || centerCount == 0) return CurrencyResult.notFound;
 
-    // Reject uniform flat blank / synthetic single-color images (variance near 0)
     final meanLum = lumSum / globalCount;
     final variance = (lumSumSq / globalCount) - (meanLum * meanLum);
-    if (variance < 20.0) {
+    final avgGrad = gradCount > 0 ? gradSum / gradCount : 0.0;
+    final highEdgeRatio = gradCount > 0 ? highEdgeCount / gradCount : 0.0;
+
+    // Banknote structural verification:
+    // Real Indian banknotes feature dense micro-printing, intaglio engraving, portraits,
+    // and complex guilloche geometries resulting in high gradient energy and high variance.
+    // Ambient natural surfaces (roads, floors, plain tables, walls, ceilings, clothing)
+    // lack this high-frequency texture and are strictly rejected to avoid false detections.
+    if (variance < 400.0 || avgGrad < 20.0 || highEdgeRatio < 0.18) {
       return CurrencyResult.notFound;
     }
 
@@ -734,9 +760,11 @@ class CurrencyRecognitionService {
 
     // ── Evaluate best match ──────────────────────────────────────────────────
     if (bestTemplate != null) {
-      // If template match and domain check agree
-      if (domainMatch != InrDenomination.unknown && domainMatch == bestTemplate.denomination) {
-        final conf = (1.0 - (bestDist / 4.0)).clamp(0.85, 0.96);
+      // 1. Both Template match and Domain rule agree with high confidence
+      if (domainMatch != InrDenomination.unknown &&
+          domainMatch == bestTemplate.denomination &&
+          bestDist < 0.90) {
+        final conf = (1.0 - (bestDist / 4.0)).clamp(0.85, 0.98);
         return CurrencyResult(
           denomination: domainMatch,
           value: _values[domainMatch]!,
@@ -751,10 +779,10 @@ class CurrencyRecognitionService {
         );
       }
 
-      // If template match distance is within confident threshold
-      if (bestDist < 1.15) {
+      // 2. Strict template match (bestDist must be tight, <= 0.65)
+      if (bestDist < 0.65) {
         final denom = bestTemplate.denomination;
-        final conf = (1.0 - (bestDist / 3.0)).clamp(0.65, 0.94);
+        final conf = (1.0 - (bestDist / 3.0)).clamp(0.70, 0.95);
         return CurrencyResult(
           denomination: denom,
           value: _values[denom]!,
@@ -763,29 +791,11 @@ class CurrencyRecognitionService {
           userAmountTa: 'உங்களிடம் ${_values[denom]!} ரூபாய் உள்ளது.',
           userAmountEn: 'You have ${_values[denom]!} Rupees.',
           confidence: conf,
-          isConfident: conf >= 0.60,
+          isConfident: true,
           matchedModel: bestTemplate.name,
           hapticPattern: _hapticPatterns[denom] ?? const [200],
         );
       }
-    }
-
-    if (domainMatch != InrDenomination.unknown) {
-      if (bestDist > 1.35) {
-        return CurrencyResult.notFound;
-      }
-      return CurrencyResult(
-        denomination: domainMatch,
-        value: _values[domainMatch]!,
-        spokenTextTa: _tamilNames[domainMatch]!,
-        spokenTextEn: _englishNames[domainMatch]!,
-        userAmountTa: 'உங்களிடம் ${_values[domainMatch]!} ரூபாய் உள்ளது.',
-        userAmountEn: 'You have ${_values[domainMatch]!} Rupees.',
-        confidence: 0.85,
-        isConfident: true,
-        matchedModel: domainModel,
-        hapticPattern: _hapticPatterns[domainMatch] ?? const [200],
-      );
     }
 
     return CurrencyResult.notFound;
