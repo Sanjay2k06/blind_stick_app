@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../services/startup_flow_manager.dart';
 
 /// Calm, high-contrast, pure Black & White opening screen and startup overlay.
@@ -29,11 +30,19 @@ class CalmStartupOverlay extends StatelessWidget {
           return const SizedBox.shrink();
         }
 
-        return Container(
-          color: Colors.black,
-          width: double.infinity,
-          height: double.infinity,
-          child: SafeArea(
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            if (flowManager.isWaitingForAutoStart) {
+              HapticFeedback.heavyImpact();
+              flowManager.startSequence();
+            }
+          },
+          child: Container(
+            color: Colors.black,
+            width: double.infinity,
+            height: double.infinity,
+            child: SafeArea(
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final double horizontalPadding = (constraints.maxWidth * 0.06).clamp(16.0, 24.0);
@@ -113,10 +122,11 @@ class CalmStartupOverlay extends StatelessWidget {
               },
             ),
           ),
-        );
-      },
-    );
-  }
+        ),
+      );
+    },
+  );
+}
 
   Widget _buildStatusWidget(StartupState state) {
     String statusText;
@@ -246,45 +256,47 @@ class CalmStartupOverlay extends StatelessWidget {
         builder: (context, seconds, _) {
           final displaySec = seconds.clamp(0, 15);
           return Semantics(
-            label: 'வழிகாட்டுதல் தயாராகிறது. 15 விநாடிகளில் தானாகத் தொடங்கும்.',
-            child: Container(
+            button: true,
+            label: 'உடனே தொடங்க தட்டவும். அல்லது $displaySec வினாடிகளில் தானாகத் தொடங்கும்.',
+            child: SizedBox(
               width: double.infinity,
               height: 72,
-              decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white, width: 2.2),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    ),
+              child: ElevatedButton(
+                onPressed: () {
+                  HapticFeedback.heavyImpact();
+                  flowManager.startSequence();
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                  elevation: 6,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                  const SizedBox(width: 12),
-                  Flexible(
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(
-                        'தயாராகிறது... ($displaySec வி)',
-                        maxLines: 1,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 0.5,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.play_arrow_rounded, size: 32, color: Colors.black),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          'உடனே தொடங்கவும் ($displaySec வி)',
+                          maxLines: 1,
+                          style: const TextStyle(
+                            color: Colors.black,
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.5,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           );

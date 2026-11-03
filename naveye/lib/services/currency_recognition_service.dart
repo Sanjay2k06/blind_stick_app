@@ -522,7 +522,7 @@ class CurrencyRecognitionService {
     final visual = _matchFromVisual(image);
     if (visual.denomination != InrDenomination.unknown &&
         visual.isConfident &&
-        visual.confidence >= 0.75) {
+        visual.confidence >= 0.70) {
       return visual;
     }
     return CurrencyResult.notFound;
@@ -635,7 +635,7 @@ class CurrencyRecognitionService {
     // and complex guilloche geometries resulting in high gradient energy and high variance.
     // Ambient natural surfaces (roads, floors, plain tables, walls, ceilings, clothing)
     // lack this high-frequency texture and are strictly rejected to avoid false detections.
-    if (variance < 400.0 || avgGrad < 20.0 || highEdgeRatio < 0.18) {
+    if (variance < 150.0 || avgGrad < 7.0 || highEdgeRatio < 0.04) {
       return CurrencyResult.notFound;
     }
 
@@ -678,7 +678,7 @@ class CurrencyRecognitionService {
               (avgGB - tpl.globalB).abs()) /
           255.0;
 
-      final dist = (2.2 * (hueDistG + hueDistC) / 2.0) +
+      final dist = (2.2 * (0.35 * hueDistG + 0.65 * hueDistC)) +
           (1.6 * satDist) +
           (0.8 * valDist) +
           (1.3 * ratioDist) +
@@ -763,7 +763,7 @@ class CurrencyRecognitionService {
       // 1. Both Template match and Domain rule agree with high confidence
       if (domainMatch != InrDenomination.unknown &&
           domainMatch == bestTemplate.denomination &&
-          bestDist < 0.90) {
+          bestDist < 1.10) {
         final conf = (1.0 - (bestDist / 4.0)).clamp(0.85, 0.98);
         return CurrencyResult(
           denomination: domainMatch,
@@ -779,8 +779,8 @@ class CurrencyRecognitionService {
         );
       }
 
-      // 2. Strict template match (bestDist must be tight, <= 0.65)
-      if (bestDist < 0.65) {
+      // 2. Strict template match (bestDist <= 0.76)
+      if (bestDist < 0.76) {
         final denom = bestTemplate.denomination;
         final conf = (1.0 - (bestDist / 3.0)).clamp(0.70, 0.95);
         return CurrencyResult(
@@ -794,6 +794,23 @@ class CurrencyRecognitionService {
           isConfident: true,
           matchedModel: bestTemplate.name,
           hapticPattern: _hapticPatterns[denom] ?? const [200],
+        );
+      }
+
+      // 3. Domain rule confident match
+      if (domainMatch != InrDenomination.unknown && bestDist < 1.05) {
+        final conf = (1.0 - (bestDist / 3.5)).clamp(0.70, 0.95);
+        return CurrencyResult(
+          denomination: domainMatch,
+          value: _values[domainMatch]!,
+          spokenTextTa: _tamilNames[domainMatch]!,
+          spokenTextEn: _englishNames[domainMatch]!,
+          userAmountTa: 'உங்களிடம் ${_values[domainMatch]!} ரூபாய் உள்ளது.',
+          userAmountEn: 'You have ${_values[domainMatch]!} Rupees.',
+          confidence: conf,
+          isConfident: true,
+          matchedModel: domainModel.isNotEmpty ? domainModel : bestTemplate.name,
+          hapticPattern: _hapticPatterns[domainMatch] ?? const [200],
         );
       }
     }

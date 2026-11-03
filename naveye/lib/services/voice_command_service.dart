@@ -132,7 +132,7 @@ class VoiceCommandService {
         await Future.delayed(const Duration(milliseconds: 800));
         if (_listening) {
           debugPrint('VoiceCmd retrying network… ($retryLeft left)');
-          await _doListen(onCommand, retryLeft: retryLeft - 1, onDevice: onDevice);
+          await _doListen(onCommand, retryLeft: retryLeft - 1, onDevice: true);
         }
       } else if (isOnDeviceFailed) {
         // On-device model unavailable — retry with cloud STT.
@@ -209,10 +209,10 @@ class VoiceCommandService {
       return VoiceCommand.emergencySOS;
     }
     // 2. Start / Stop controls
-    if (_has(lower, ['start', 'begin', 'go', 'detect', 'scan', 'activate', 'தொடங்கு', 'ஆரம்பி'])) {
+    if (_has(lower, ['start', 'begin', 'go', 'detect', 'scan', 'activate', 'navigation', 'navigate', 'guide', 'guidance', 'start navigation', 'open navigation', 'தொடங்கு', 'ஆரம்பி', 'வழிகாட்டுதல்', 'வழி', 'வழிசெலுத்து', 'வழிகாட்டுதலை தொடங்கு'])) {
       return VoiceCommand.start;
     }
-    if (_has(lower, ['stop', 'end', 'off', 'pause', 'halt', 'cancel', 'finish', 'deactivate', 'நிறுத்து', 'முடி'])) {
+    if (_has(lower, ['stop', 'end', 'off', 'pause', 'halt', 'cancel', 'finish', 'deactivate', 'stop navigation', 'நிறுத்து', 'முடி', 'வழிகாட்டுதலை நிறுத்து'])) {
       return VoiceCommand.stop;
     }
     if (_has(lower, ['repeat', 'again', 'say again', 'what was that', 'pardon', 'what did', 'மீண்டும்', 'திரும்ப'])) {
@@ -224,7 +224,8 @@ class VoiceCommandService {
       'எவ்வளவு பணம்', 'காசு எவ்வளவு', 'நோட்டு என்ன', 'ரூபாய் எவ்வளவு',
       'currency', 'money', 'rupee', 'banknote', 'cash', 'how much money',
       'how much cash', 'how much do i have', 'how much have i', 'count money',
-      'check money', 'check currency', 'identify currency', 'read money', 'my money'
+      'check money', 'check currency', 'identify currency', 'read money', 'my money',
+      'பணம் பார்', 'நோட்டு பார்', 'பணத்தை பார்', 'காசை பார்', 'detect money', 'scan money'
     ])) {
       return VoiceCommand.identifyCurrency;
     }

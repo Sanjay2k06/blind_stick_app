@@ -200,8 +200,8 @@ class _MainAIScreenState extends State<MainAIScreen>
   final TtsService          _tts      = TtsService();
   final VoiceCommandService _voice    = VoiceCommandService();
   final DetectionStabilizer _stabilizer = DetectionStabilizer(
-    stabilityThresholdMs: 350,
-    confidenceThreshold: 0.50,
+    stabilityThresholdMs: 250,
+    confidenceThreshold: 0.35,
   );
   final NavigationDecisionEngine _decisionEngine = NavigationDecisionEngine();
   late final VoiceAlertManager _voiceAlert;
@@ -262,6 +262,7 @@ class _MainAIScreenState extends State<MainAIScreen>
         .animate(CurvedAnimation(parent: _pulse, curve: Curves.easeInOut));
 
     _startupFlowManager = StartupFlowManager(
+      startupDuration: const Duration(seconds: 3),
       onStartCamera: () async {
         await _initCamera();
       },
@@ -281,6 +282,12 @@ class _MainAIScreenState extends State<MainAIScreen>
         }
       },
     );
+
+    unawaited(_detector.loadModel().then((_) {
+      if (mounted) setState(() => _modelReady = _detector.isLoaded);
+    }).catchError((e) => debugPrint('Pre-warm detector error: $e')));
+    unawaited(FaceRecognitionService.instance.init().catchError(
+      (e) => debugPrint('Pre-warm face service error: $e')));
 
     _init();
   }
@@ -560,7 +567,7 @@ class _MainAIScreenState extends State<MainAIScreen>
 
           // Confirmed across at least 3 consecutive checks (~1050ms temporal stability)
           // to ensure a genuine, stable banknote is presented
-          if (_currencyStabilityCount >= 3) {
+          if (_currencyStabilityCount >= 2) {
             final isNewDenom = curr.denomination != _lastAnnouncedDenom;
 
             // Announce ONLY ONCE per note presentation (do not repeat every few seconds)
@@ -786,6 +793,22 @@ class _MainAIScreenState extends State<MainAIScreen>
     _voiceAlert.pause();
     await _voiceAlert.stop();
     await _tts.stop();
+    try {
+      final micStatus = await Permission.microphone.status;
+      if (!micStatus.isGranted) {
+        final req = await Permission.microphone.request();
+        if (!req.isGranted) {
+          await _tts.speakAndWait('மைக்ரோஃபோன் அனுமதி தேவை. அமைப்புகளில் அனுமதியை இயக்கவும்.');
+          _resumeDetectionIfNeeded();
+          return;
+        }
+        SharedStt.instance.reset();
+      }
+    } catch (e) {
+      debugPrint('Microphone permission check error: $e');
+    }
+
+    await _tts.speakAndWait('சொல்லுங்கள்');
     _tts.mute();
 
     HapticFeedback.heavyImpact();
@@ -886,7 +909,15 @@ class _MainAIScreenState extends State<MainAIScreen>
       case VoiceCommand.readText:
         await _tts.speakAndWait('வாசகம் படிக்கப்படுகிறது.');
         String? ocrPath;
-        if (_cam != null && _cameraReady) {
+        if (_lastFrame != null) {
+          try {
+            ocrPath = '${Directory.systemTemp.path}/ocr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
+            final encoded = img.encodeJpg(_lastFrame!, quality: 90);
+            await File(ocrPath).writeAsBytes(encoded);
+          } catch (e) {
+            debugPrint('OCR encode error: $e');
+          }
+        } else if (_cam != null && _cameraReady) {
           try {
             final xFile = await _cam!.takePicture();
             ocrPath = xFile.path;
@@ -894,7 +925,7 @@ class _MainAIScreenState extends State<MainAIScreen>
             debugPrint('OCR capture error: $e');
           }
         }
-        if (ocrPath == null && _lastFrame != null) {
+        if (false && _lastFrame != null) {
           try {
             ocrPath = '${Directory.systemTemp.path}/ocr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
             final encoded = img.encodeJpg(_lastFrame!, quality: 90);
@@ -1049,14 +1080,23 @@ class _MainAIScreenState extends State<MainAIScreen>
     await _tts.speakAndWait('ரூபாய் நோட்டை சரிபார்க்கிறேன். கேமராவில் காட்டவும்.');
 
     img.Image? currFrame = _lastFrame;
-    if (_cam != null && _cameraReady) {
+    if (currFrame == null && _cam != null && _cameraReady) {
       try {
+        final bool wasStreaming = _isStreaming;
+        if (wasStreaming) {
+          await _cam!.stopImageStream();
+          _isStreaming = false;
+        }
         final xFile = await _cam!.takePicture();
         final bytes = await File(xFile.path).readAsBytes();
         currFrame = img.decodeImage(bytes);
-        await File(xFile.path).delete();
+        try { await File(xFile.path).delete(); } catch (_) {}
+        if (wasStreaming && mounted && _cam != null) {
+          _cam!.startImageStream(_processFrame);
+          _isStreaming = true;
+        }
       } catch (e) {
-        debugPrint('Currency high-res capture fallback to last frame: $e');
+        debugPrint('Currency capture error: $e');
       }
     }
 

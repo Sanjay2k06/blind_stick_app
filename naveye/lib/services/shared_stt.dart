@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
 
@@ -46,6 +47,22 @@ class SharedStt {
     _initCompleter = Completer<bool>();
     debugPrint('SharedStt: initializing speech engine...');
     try {
+      try {
+        final status = await Permission.microphone.status;
+        if (!status.isGranted) {
+          final res = await Permission.microphone.request();
+          if (!res.isGranted) {
+            debugPrint('SharedStt: microphone permission not granted ($res)');
+            _available = false;
+            _initialized = true;
+            _initCompleter!.complete(false);
+            return false;
+          }
+        }
+      } catch (permErr) {
+        debugPrint('SharedStt: permission check skipped or mock: $permErr');
+      }
+
       _available = await _stt.initialize(
         onError:  (e) {
           debugPrint('STT error: ${e.errorMsg}');

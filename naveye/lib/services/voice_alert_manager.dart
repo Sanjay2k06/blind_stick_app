@@ -294,21 +294,21 @@ class VoiceAlertManager {
       return; // SILENCE! Keep detection running constantly without repeating voice.
     }
 
-    // ── 6. Multi-object scene focus lock ──
-    if (_activeFocusKey != null && _activeFocusKey != alert.rawLabel && _activeFocusKey != 'clear' && !isEmergencyStop) {
+    // ── 6. Refresh speaking priority & check active TTS ──
+    final bool ttsActive = _isTtsActive(now);
+    if (!ttsActive) {
+      _currentSpeakingPriority = null;
+    }
+
+    // ── 7. Multi-object scene focus lock while speaking ──
+    if (ttsActive && _activeFocusKey != null && _activeFocusKey != alert.rawLabel && _activeFocusKey != 'clear' && !isEmergencyStop) {
       final activeRecord = _recordsByClass[_activeFocusKey];
       if (activeRecord != null && !activeRecord.isExpired(now)) {
         final activePriority = _currentSpeakingPriority ?? AlertPriority.normalObject;
         if (!alert.priority.isStrictlyHigher(activePriority)) {
-          return; // Stay focused on primary instruction silently.
+          return; // Stay focused on primary instruction while speech is in progress.
         }
       }
-    }
-
-    // ── 7. Refresh speaking priority if TTS has finished ──
-    final bool ttsActive = _isTtsActive(now);
-    if (!ttsActive) {
-      _currentSpeakingPriority = null;
     }
 
     // ── 8. Priority Preemption & Single Voice Output ──

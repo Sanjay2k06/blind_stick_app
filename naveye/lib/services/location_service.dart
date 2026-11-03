@@ -11,7 +11,7 @@ import 'package:geolocator/geolocator.dart';
 class LocationService {
   final Duration timeout;
 
-  LocationService({this.timeout = const Duration(seconds: 10)});
+  LocationService({this.timeout = const Duration(seconds: 4)});
 
   /// Checks if location permission is granted, requests if needed.
   Future<bool> ensurePermission() async {
@@ -38,34 +38,47 @@ class LocationService {
     return true;
   }
 
-  /// Attempts to acquire current position with timeout and fallback.
+  /// Attempts to acquire current position with fast cache-first fallback and bounded timeout.
   Future<Position?> getCurrentLocation({int maxRetries = 1}) async {
+    final hasPermission = await ensurePermission();
+    if (!hasPermission) return null;
+
+    // Fast check: if recent cached position exists (< 10 minutes), use it immediately
+    try {
+      final lastKnown = await Geolocator.getLastKnownPosition();
+      if (lastKnown != null) {
+        final age = DateTime.now().difference(lastKnown.timestamp);
+        if (age.inMinutes < 10) {
+          debugPrint('LocationService: Using fresh cached position (${age.inSeconds}s old)');
+          return lastKnown;
+        }
+      }
+    } catch (_) {}
+
     for (int attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        final hasPermission = await ensurePermission();
-        if (!hasPermission) return null;
-
         final position = await Geolocator.getCurrentPosition(
           locationSettings: LocationSettings(
-            accuracy: LocationAccuracy.high,
+            accuracy: LocationAccuracy.medium,
             timeLimit: timeout,
           ),
         );
         return position;
       } catch (e) {
         debugPrint('LocationService: Attempt $attempt failed to acquire GPS: $e');
+        // Fallback to last known position if current satellite lock timed out
+        try {
+          final lastKnown = await Geolocator.getLastKnownPosition();
+          if (lastKnown != null) {
+            debugPrint('LocationService: Utilizing last known position as fallback');
+            return lastKnown;
+          }
+        } catch (_) {}
+
         if (attempt == maxRetries) {
-          // As a fallback, try to get the last known position
-          try {
-            final lastKnown = await Geolocator.getLastKnownPosition();
-            if (lastKnown != null) {
-              debugPrint('LocationService: Utilizing last known position as fallback');
-              return lastKnown;
-            }
-          } catch (_) {}
           return null;
         }
-        await Future.delayed(const Duration(milliseconds: 500));
+        await Future.delayed(const Duration(milliseconds: 300));
       }
     }
     return null;

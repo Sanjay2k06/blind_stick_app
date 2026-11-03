@@ -40,7 +40,7 @@ enum StartupState {
 }
 
 class StartupFlowManager {
-  static const Duration defaultStartupDuration = Duration(seconds: 15);
+  static const Duration defaultStartupDuration = Duration(seconds: 3);
   final Duration startupDuration;
 
   final StartupAudioManager audioManager;
@@ -55,14 +55,14 @@ class StartupFlowManager {
   final ValueNotifier<StartupState> stateNotifier =
       ValueNotifier<StartupState>(StartupState.appOpening);
 
-  /// Seconds remaining in the 15-second startup countdown.
-  final ValueNotifier<int> remainingSecondsNotifier = ValueNotifier<int>(15);
+  /// Seconds remaining in the startup countdown.
+  final ValueNotifier<int> remainingSecondsNotifier = ValueNotifier<int>(3);
 
   bool _isStartingLock = false;
   bool _isStartupCompleted = false;
   bool _isPaused = false;
   Timer? _countdownTimer;
-  int _secondsLeft = 15;
+  int _secondsLeft = 3;
 
   StartupFlowManager({
     this.startupDuration = defaultStartupDuration,
