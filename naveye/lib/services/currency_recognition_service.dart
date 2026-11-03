@@ -487,7 +487,7 @@ class CurrencyRecognitionService {
       modelName = 'OCR Text';
     } else if (visualMatch.denomination != InrDenomination.unknown &&
         visualMatch.isConfident &&
-        visualMatch.confidence >= 0.70) {
+        visualMatch.confidence >= 0.65) {
       finalDenom = visualMatch.denomination;
       finalConfidence = visualMatch.confidence;
       modelName = visualMatch.matchedModel;
@@ -522,13 +522,13 @@ class CurrencyRecognitionService {
     final visual = _matchFromVisual(image);
     if (visual.denomination != InrDenomination.unknown &&
         visual.isConfident &&
-        visual.confidence >= 0.70) {
+        visual.confidence >= 0.65) {
       return visual;
     }
     return CurrencyResult.notFound;
   }
 
-  /// Multilingual OCR token and numeral parser (English + Devanagari + Tamil)
+  /// Multilingual OCR token and numeral parser (English + Devanagari + Tamil + Normalization)
   InrDenomination _matchFromText(String text) {
     final lower = text.toLowerCase();
 
@@ -536,25 +536,76 @@ class CurrencyRecognitionService {
     final clean = text.replaceAll(RegExp(r'[^0-9]'), ' ');
     final tokens = clean.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
 
-    if (tokens.contains('2000') || text.contains('2000') || text.contains('२०००') || lower.contains('two thousand') || lower.contains('இரண்டாயிரம்')) {
+    // 2. OCR character normalization (O/o -> 0, I/l/| -> 1, S -> 5, Z -> 2)
+    final normClean = lower
+        .replaceAll('₹', ' ')
+        .replaceAll('rs.', ' ')
+        .replaceAll('rs', ' ')
+        .replaceAll('/-', ' ')
+        .replaceAll(RegExp(r'\b5[oOdD]{2}\b'), '500')
+        .replaceAll(RegExp(r'\b2[oOdD]{2}\b'), '200')
+        .replaceAll(RegExp(r'\b[1ilI|][oOdD]{2}\b'), '100')
+        .replaceAll(RegExp(r'\b2[oOdD]{3}\b'), '2000')
+        .replaceAll(RegExp(r'\b5[oOdD]\b'), '50')
+        .replaceAll(RegExp(r'\b2[oOdD]\b'), '20')
+        .replaceAll(RegExp(r'\b[1ilI|][oOdD]\b'), '10')
+        .replaceAll(RegExp(r'[^0-9]'), ' ');
+
+    final normTokens = normClean.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
+
+    // ₹2000 Note
+    if (tokens.contains('2000') || normTokens.contains('2000') ||
+        text.contains('2000') || text.contains('२०००') ||
+        lower.contains('two thousand') || lower.contains('दो हज़ार') ||
+        lower.contains('दो हजार') || lower.contains('இரண்டாயிரம்')) {
       return InrDenomination.twoThousand;
     }
-    if (tokens.contains('500') || text.contains('500') || text.contains('५००') || lower.contains('five hundred') || lower.contains('ஐந்நூறு')) {
+
+    // ₹500 Note
+    if (tokens.contains('500') || normTokens.contains('500') ||
+        text.contains('500') || text.contains('५००') ||
+        lower.contains('five hundred') || lower.contains('पाँच सौ') ||
+        lower.contains('पांच सौ') || lower.contains('ஐந்நூறு')) {
       return InrDenomination.fiveHundred;
     }
-    if (tokens.contains('200') || text.contains('200') || text.contains('२००') || lower.contains('two hundred') || lower.contains('இருநூறு')) {
+
+    // ₹200 Note
+    if (tokens.contains('200') || normTokens.contains('200') ||
+        text.contains('200') || text.contains('२००') ||
+        lower.contains('two hundred') || lower.contains('दो सौ') ||
+        lower.contains('இருநூறு')) {
       return InrDenomination.twoHundred;
     }
-    if (tokens.contains('100') || text.contains('100') || text.contains('१००') || lower.contains('one hundred') || lower.contains('நூறு')) {
+
+    // ₹100 Note
+    if (tokens.contains('100') || normTokens.contains('100') ||
+        text.contains('100') || text.contains('१००') ||
+        lower.contains('one hundred') || lower.contains('एक सौ') ||
+        lower.contains('நூறு')) {
       return InrDenomination.oneHundred;
     }
-    if (tokens.contains('50') || text.contains('50') || text.contains('५०') || lower.contains('fifty') || lower.contains('ஐம்பது')) {
+
+    // ₹50 Note
+    if (tokens.contains('50') || normTokens.contains('50') ||
+        text.contains('50') || text.contains('५०') ||
+        lower.contains('fifty') || lower.contains('पचास') ||
+        lower.contains('ஐம்பது')) {
       return InrDenomination.fifty;
     }
-    if (tokens.contains('20') || text.contains('20') || text.contains('२०') || lower.contains('twenty') || lower.contains('இருபது')) {
+
+    // ₹20 Note
+    if (tokens.contains('20') || normTokens.contains('20') ||
+        text.contains('20') || text.contains('२०') ||
+        lower.contains('twenty') || lower.contains('बीस') ||
+        lower.contains('இருபது')) {
       return InrDenomination.twenty;
     }
-    if (tokens.contains('10') || text.contains('10') || text.contains('१०') || lower.contains('ten') || lower.contains('பத்து')) {
+
+    // ₹10 Note
+    if (tokens.contains('10') || normTokens.contains('10') ||
+        text.contains('10') || text.contains('१०') ||
+        lower.contains('ten') || lower.contains('दस') ||
+        lower.contains('பத்து')) {
       return InrDenomination.ten;
     }
 
@@ -635,7 +686,7 @@ class CurrencyRecognitionService {
     // and complex guilloche geometries resulting in high gradient energy and high variance.
     // Ambient natural surfaces (roads, floors, plain tables, walls, ceilings, clothing)
     // lack this high-frequency texture and are strictly rejected to avoid false detections.
-    if (variance < 150.0 || avgGrad < 7.0 || highEdgeRatio < 0.04) {
+    if (variance < 120.0 || avgGrad < 6.0 || highEdgeRatio < 0.03) {
       return CurrencyResult.notFound;
     }
 
@@ -763,7 +814,7 @@ class CurrencyRecognitionService {
       // 1. Both Template match and Domain rule agree with high confidence
       if (domainMatch != InrDenomination.unknown &&
           domainMatch == bestTemplate.denomination &&
-          bestDist < 1.10) {
+          bestDist < 1.15) {
         final conf = (1.0 - (bestDist / 4.0)).clamp(0.85, 0.98);
         return CurrencyResult(
           denomination: domainMatch,
@@ -780,7 +831,7 @@ class CurrencyRecognitionService {
       }
 
       // 2. Strict template match (bestDist <= 0.76)
-      if (bestDist < 0.76) {
+      if (bestDist < 0.85) {
         final denom = bestTemplate.denomination;
         final conf = (1.0 - (bestDist / 3.0)).clamp(0.70, 0.95);
         return CurrencyResult(
@@ -798,7 +849,7 @@ class CurrencyRecognitionService {
       }
 
       // 3. Domain rule confident match
-      if (domainMatch != InrDenomination.unknown && bestDist < 1.05) {
+      if (domainMatch != InrDenomination.unknown && bestDist < 1.15) {
         final conf = (1.0 - (bestDist / 3.5)).clamp(0.70, 0.95);
         return CurrencyResult(
           denomination: domainMatch,

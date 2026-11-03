@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import '../services/shared_stt.dart';
 import '../services/tts_service.dart';
@@ -105,20 +108,15 @@ class VoiceTextField extends StatefulWidget {
 }
 
 class _VoiceTextFieldState extends State<VoiceTextField> {
-  bool  _listening    = false;
-  // BUG-9 FIX: use nullable bool so we can distinguish three states:
-  //   null  = STT initialising (show spinner, taps silently ignored)
-  //   false = STT unavailable  (show disabled grey mic)
-  //   true  = STT ready        (show yellow tappable mic)
-  bool? _sttAvailable;
+  bool _listening = false;
+
 
   @override
   void initState() {
     super.initState();
-    SharedStt.instance.init().then((ok) {
-      debugPrint('VoiceTextField(${widget.label}): STT available=$ok');
-      if (mounted) setState(() => _sttAvailable = ok);
-    });
+    SharedStt.instance.init().catchError((_) => false);
+
+
   }
 
   @override
@@ -127,34 +125,79 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     super.dispose();
   }
 
-  Future<void> _startListening() async {
-    if (_sttAvailable != true || _listening) return;
+  String _formatSpokenNumbers(String input) {
+    var s = input.trim();
+    final wordMap = {
+      'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+      'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+      'பூஜ்ஜியம்': '0', 'ஒன்று': '1', 'இரண்டு': '2', 'மூன்று': '3', 'நான்கு': '4',
+      'ஐந்து': '5', 'ஆறு': '6', 'ஏழு': '7', 'எட்டு': '8', 'ஒன்பது': '9', 'பத்து': '10'
+    };
+    wordMap.forEach((k, v) {
+      s = s.replaceAll(RegExp('\b$k\b', caseSensitive: false), v);
+    });
+    // Remove space between digits
+    s = s.replaceAll(RegExp(r'(?<=\d)\s+(?=\d)'), '');
+    return s;
+  }
 
-    // FIX-1: Stop TTS before starting STT. If TTS is still speaking the
-    // opening guidance, STT gets error_audio immediately (both compete for
-    // the audio focus / microphone on Android).
+  Future<void> _stopListening() async {
+    SharedStt.instance.clearListeners();
+    await SharedStt.instance.stop();
+    if (mounted) setState(() => _listening = false);
+  }
+
+  Future<void> _startListening() async {
+    if (_listening) return;
+
+    // 1. Immediately stop any active TTS guidance so audio focus is clear
     await TtsService().stop();
+    HapticFeedback.mediumImpact();
+
+    // 2. Request mic permission if not granted
+    try {
+      final status = await Permission.microphone.status;
+      if (!status.isGranted) {
+        final req = await Permission.microphone.request();
+        if (!req.isGranted) {
+          debugPrint('VoiceTextField: Mic permission denied');
+
+          return;
+        }
+        SharedStt.instance.reset();
+      }
+    } catch (e) {
+      debugPrint('VoiceTextField permission check: $e');
+    }
+
+    // 3. Ensure SharedStt is initialized
+    bool ok = SharedStt.instance.available;
+    if (!ok) {
+      ok = await SharedStt.instance.init();
+
+      if (!ok) {
+        debugPrint('VoiceTextField: SharedStt init returned false');
+        return;
+      }
+    }
 
     if (SharedStt.instance.isListening) {
       await SharedStt.instance.stop();
     }
-    // Samsung audio hardware needs ~500 ms to fully release after TTS/previous
-    // STT session before a new listen() call can succeed without error_busy.
-    await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
 
-    setState(() => _listening = true);
+    setState(() {
+      _listening = true;
 
-    // Reset mic on any STT error (error_audio, error_busy, network, etc.)
+    });
+
     SharedStt.instance.setErrorListener((e) {
       debugPrint('STT error in VoiceTextField: ${e.errorMsg}');
       SharedStt.instance.clearListeners();
       if (mounted) setState(() => _listening = false);
     });
 
-    // FIX-3: Status listener — reset mic when STT engine reports done/stopped.
-    // Without this, if STT ends without a finalResult (e.g. silence timeout),
-    // the mic button stays green/ON forever.
     SharedStt.instance.setStatusListener((status) {
       debugPrint('STT status in VoiceTextField: $status');
       if (status == 'notListening' || status == 'done') {
@@ -164,31 +207,34 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
     });
 
     try {
-      debugPrint('STT listen ← VoiceTextField (label="${widget.label}")');
+      final prefs = await SharedPreferences.getInstance();
+      final lang = (prefs.getString('language') ?? 'Tamil').toLowerCase();
+      final localeId = lang.contains('english') ? 'en_US' : 'ta_IN';
+
+      debugPrint('STT listen ← VoiceTextField (label="${widget.label}", localeId=$localeId)');
       await SharedStt.instance.raw.listen(
         onResult: (result) {
-          final words = result.recognizedWords.trim();
-          if (words.isNotEmpty) widget.controller?.text = words;
+          String words = result.recognizedWords.trim();
+          if (words.isNotEmpty) {
+            if (widget.keyboardType == TextInputType.number || widget.keyboardType == TextInputType.phone) {
+              words = _formatSpokenNumbers(words);
+            }
+            widget.controller?.text = words;
+          }
           if (result.finalResult) {
             SharedStt.instance.clearListeners();
             if (mounted) setState(() => _listening = false);
           }
         },
-        // FIX-2: onDevice: true fails on devices without an on-device speech
-        // model (e.g. Samsung A30 Android 10 with no offline model installed).
-        // Using cloud-based recognition (onDevice: false) is reliable on all
-        // Android devices that have Google app installed.
         listenOptions: SpeechListenOptions(
+          localeId: localeId,
           cancelOnError: false,
           partialResults: true,
           onDevice: false,
           listenFor: const Duration(seconds: 15),
-          pauseFor: const Duration(seconds: 5),
+          pauseFor: const Duration(seconds: 4),
         ),
       );
-      // NOTE: raw.listen() returns as soon as the session STARTS (it is NOT
-      // a blocking call that waits for final result). Do NOT reset _listening
-      // here — the status listener and onResult handle that asynchronously.
     } catch (e) {
       debugPrint('STT listen exception: $e');
       SharedStt.instance.clearListeners();
@@ -214,28 +260,15 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
         ),
         const SizedBox(width: 8),
         GestureDetector(
-          onTap: _listening
-              ? () async {
-                  SharedStt.instance.clearListeners();
-                  await SharedStt.instance.stop();
-                  if (mounted) setState(() => _listening = false);
-                }
-              : (_sttAvailable == true ? _startListening : null),
+          onTap: _listening ? _stopListening : _startListening,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             width: 46, height: 46,
             decoration: BoxDecoration(
-              // ON      = white fill + glow (clearly active)
-              // OFF     = dark fill + white border (clearly tappable)
-              // LOADING = dark fill + grey border (init in progress)
               color: _listening ? AppColors.white : AppColors.surface,
               shape: BoxShape.circle,
               border: Border.all(
-                color: _listening
-                    ? AppColors.white
-                    : _sttAvailable == true
-                        ? AppColors.white
-                        : AppColors.greyDark,
+                color: AppColors.white,
                 width: _listening ? 2.5 : 1.5,
               ),
               boxShadow: _listening
@@ -244,22 +277,11 @@ class _VoiceTextFieldState extends State<VoiceTextField> {
                       blurRadius: 10, spreadRadius: 1)]
                   : null,
             ),
-            child: _sttAvailable == null
-                // Initialising — show tiny spinner
-                ? const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: CircularProgressIndicator(
-                        strokeWidth: 1.5, color: AppColors.grey))
-                : Icon(
-                    _listening ? Icons.mic : Icons.mic_none,
-                    // ON = black; OFF ready = white; unavailable = grey
-                    color: _listening
-                        ? Colors.black
-                        : _sttAvailable == true
-                            ? AppColors.white
-                            : AppColors.grey,
-                    size: 22,
-                  ),
+            child: Icon(
+              _listening ? Icons.mic : Icons.mic_none,
+              color: _listening ? Colors.black : Colors.white,
+              size: 22,
+            ),
           ),
         ),
       ]),

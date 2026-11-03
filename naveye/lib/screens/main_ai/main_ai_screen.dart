@@ -243,7 +243,7 @@ class _MainAIScreenState extends State<MainAIScreen>
   bool _isCurrencyScanning = false;
   Timer? _currencyDismissTimer;
   DateTime _lastCurrencyAutoCheck = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastCurrencyAnnouncedAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   InrDenomination _lastCandidateDenom = InrDenomination.unknown;
   InrDenomination _lastAnnouncedDenom = InrDenomination.unknown;
   int _currencyStabilityCount = 0;
@@ -262,7 +262,7 @@ class _MainAIScreenState extends State<MainAIScreen>
         .animate(CurvedAnimation(parent: _pulse, curve: Curves.easeInOut));
 
     _startupFlowManager = StartupFlowManager(
-      startupDuration: const Duration(seconds: 3),
+      startupDuration: const Duration(seconds: 15),
       onStartCamera: () async {
         await _initCamera();
       },
@@ -573,7 +573,7 @@ class _MainAIScreenState extends State<MainAIScreen>
             // Announce ONLY ONCE per note presentation (do not repeat every few seconds)
             if (isNewDenom) {
               _lastAnnouncedDenom = curr.denomination;
-              _lastCurrencyAnnouncedAt = now;
+
 
               // Automatically add to session wallet accumulator ONLY ONCE
               CurrencyRecognitionService.instance.addNoteToWallet(curr.value);
@@ -600,9 +600,9 @@ class _MainAIScreenState extends State<MainAIScreen>
                   '${curr.userAmountTa} ${curr.spokenTextTa}. $totalText';
               await _tts.speakNow(announcement);
 
-              // Auto-dismiss OLED HUD overlay after 6 seconds
+              // Auto-dismiss OLED HUD overlay quickly so user returns to navigation
               _currencyDismissTimer?.cancel();
-              _currencyDismissTimer = Timer(const Duration(seconds: 6), () {
+              _currencyDismissTimer = Timer(const Duration(milliseconds: 1500), () {
                 if (mounted) {
                   setState(() {
                     _showCurrencyOledOverlay = false;
@@ -925,7 +925,7 @@ class _MainAIScreenState extends State<MainAIScreen>
             debugPrint('OCR capture error: $e');
           }
         }
-        if (false && _lastFrame != null) {
+        if (ocrPath == null && _lastFrame != null) {
           try {
             ocrPath = '${Directory.systemTemp.path}/ocr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
             final encoded = img.encodeJpg(_lastFrame!, quality: 90);
@@ -1104,7 +1104,11 @@ class _MainAIScreenState extends State<MainAIScreen>
       String? ocrText;
       try {
         final tmpPath = '${Directory.systemTemp.path}/curr_snap_${DateTime.now().millisecondsSinceEpoch}.jpg';
-        final encoded = img.encodeJpg(currFrame, quality: 85);
+        img.Image ocrImg = currFrame;
+        if (ocrImg.width > 1200 || ocrImg.height > 1200) {
+          ocrImg = img.copyResize(ocrImg, width: ocrImg.width > 1200 ? 1200 : ocrImg.width);
+        }
+        final encoded = img.encodeJpg(ocrImg, quality: 92);
         final tmpFile = File(tmpPath);
         await tmpFile.writeAsBytes(encoded);
         final ocrRes = await OcrService.instance.processImageFile(tmpPath);
@@ -1148,15 +1152,15 @@ class _MainAIScreenState extends State<MainAIScreen>
         await _tts.speakAndWait(currResult.spokenTextTa);
       }
 
-      // Keep OLED display visible, auto-dismiss after 10 seconds if idle
+      // Once it speaks to the user, automatically leave the money display and return to navigation
       _currencyDismissTimer?.cancel();
-      _currencyDismissTimer = Timer(const Duration(seconds: 10), () {
-        if (mounted) {
-          setState(() {
-            _showCurrencyOledOverlay = false;
-          });
-        }
-      });
+      _currencyDismissTimer = null;
+      if (mounted) {
+        setState(() {
+          _showCurrencyOledOverlay = false;
+          _isCurrencyScanning = false;
+        });
+      }
     } else {
       if (mounted) {
         setState(() {
@@ -1164,6 +1168,11 @@ class _MainAIScreenState extends State<MainAIScreen>
         });
       }
       await _tts.speakAndWait('படம் எடுக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.');
+      if (mounted) {
+        setState(() {
+          _showCurrencyOledOverlay = false;
+        });
+      }
     }
   }
 

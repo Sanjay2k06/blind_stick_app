@@ -1,9 +1,10 @@
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:geolocator/geolocator.dart';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:vibration/vibration.dart';
+import 'location_service.dart';
 
 class SosPayload {
   final double latitude;
@@ -55,14 +56,8 @@ class EmergencySosService {
     double lat = 13.0827; // Chennai fallback
     double lng = 80.2707;
     try {
-      final hasPerm = await Geolocator.checkPermission();
-      if (hasPerm == LocationPermission.always || hasPerm == LocationPermission.whileInUse) {
-        final pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 4),
-          ),
-        );
+      final pos = await LocationService(timeout: const Duration(seconds: 4)).getCurrentLocation(maxRetries: 2);
+      if (pos != null) {
         lat = pos.latitude;
         lng = pos.longitude;
       }
