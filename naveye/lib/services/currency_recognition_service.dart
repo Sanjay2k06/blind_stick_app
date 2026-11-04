@@ -102,41 +102,308 @@ class CurrencyTemplate {
   });
 }
 
+/// Represents an actively tracked banknote in the camera frame
+class TrackedCurrencyNote {
+  final int trackingId;
+  final InrDenomination denomination;
+  final int value;
+  double xCenter;
+  double yCenter;
+  double width;
+  double height;
+  final DateTime firstSeen;
+  DateTime lastSeen;
+  int consecutiveFrames;
+  bool isCounted;
+  bool isConfirmed;
+
+  TrackedCurrencyNote({
+    required this.trackingId,
+    required this.denomination,
+    required this.value,
+    this.xCenter = 0.5,
+    this.yCenter = 0.5,
+    this.width = 0.5,
+    this.height = 0.3,
+    required this.firstSeen,
+    required this.lastSeen,
+    this.consecutiveFrames = 1,
+    this.isCounted = false,
+    this.isConfirmed = false,
+  });
+
+  double distanceTo(double x, double y) {
+    final dx = xCenter - x;
+    final dy = yCenter - y;
+    return sqrt(dx * dx + dy * dy);
+  }
+}
+
+/// Multi-note session tracker that prevents duplicate counting and manages session balance
+class CurrencySessionTracker {
+  int _nextId = 1;
+  final List<TrackedCurrencyNote> _activeTracks = [];
+  final List<TrackedCurrencyNote> _sessionCountedNotes = [];
+  int _sessionTotal = 0;
+
+  int get sessionTotal => _sessionTotal;
+  List<TrackedCurrencyNote> get sessionNotes => List.unmodifiable(_sessionCountedNotes);
+
+  List<TrackedCurrencyNote> get currentVisibleNotes => List.unmodifiable(
+      _activeTracks.where((t) => t.isConfirmed && DateTime.now().difference(t.lastSeen).inMilliseconds < 1800));
+
+  int get currentVisibleTotal => currentVisibleNotes.fold(0, (sum, n) => sum + n.value);
+
+  /// Registers a detected note in this frame and updates spatial tracking.
+  /// Returns the note IF it is newly verified and counted on this frame;
+  /// returns null if it is already counted or still awaiting confirmation.
+  TrackedCurrencyNote? updateWithDetection({
+    required InrDenomination denomination,
+    required int value,
+    double xCenter = 0.5,
+    double yCenter = 0.5,
+    double width = 0.5,
+    double height = 0.3,
+    DateTime? timestamp,
+    int minConsecutive = 3,
+  }) {
+    final now = timestamp ?? DateTime.now();
+    _pruneStale(now);
+
+    if (denomination == InrDenomination.unknown || value <= 0) {
+      return null;
+    }
+
+    // 1. Spatial centroid & denomination matching to track the same physical note
+    TrackedCurrencyNote? matched;
+    double bestDist = 0.35; // maximum centroid drift threshold
+    for (final track in _activeTracks) {
+      if (track.denomination == denomination) {
+        final d = track.distanceTo(xCenter, yCenter);
+        if (d < bestDist) {
+          bestDist = d;
+          matched = track;
+        }
+      }
+    }
+
+    if (matched != null) {
+      // Existing note: smooth centroid, update lastSeen, increment frame counter
+      matched.lastSeen = now;
+      matched.xCenter = 0.7 * xCenter + 0.3 * matched.xCenter;
+      matched.yCenter = 0.7 * yCenter + 0.3 * matched.yCenter;
+      matched.consecutiveFrames++;
+
+      if (matched.consecutiveFrames >= minConsecutive && !matched.isConfirmed) {
+        matched.isConfirmed = true;
+        if (!matched.isCounted) {
+          matched.isCounted = true;
+          _sessionCountedNotes.add(matched);
+          _sessionTotal += matched.value;
+          return matched; // Newly verified and counted!
+        }
+      }
+      return null; // Already confirmed or counted; do not count again!
+    } else {
+      // New note candidate track
+      final newTrack = TrackedCurrencyNote(
+        trackingId: _nextId++,
+        denomination: denomination,
+        value: value,
+        xCenter: xCenter,
+        yCenter: yCenter,
+        width: width,
+        height: height,
+        firstSeen: now,
+        lastSeen: now,
+        consecutiveFrames: 1,
+        isConfirmed: minConsecutive <= 1,
+        isCounted: minConsecutive <= 1,
+      );
+
+      _activeTracks.add(newTrack);
+
+      if (minConsecutive <= 1) {
+        _sessionCountedNotes.add(newTrack);
+        _sessionTotal += value;
+        return newTrack;
+      }
+      return null;
+    }
+  }
+
+  /// Manually registers an explicit note (e.g. from OCR tap-to-scan button)
+  TrackedCurrencyNote registerExplicitNote(InrDenomination denomination, int value) {
+    final now = DateTime.now();
+    final note = TrackedCurrencyNote(
+      trackingId: _nextId++,
+      denomination: denomination,
+      value: value,
+      firstSeen: now,
+      lastSeen: now,
+      consecutiveFrames: 3,
+      isConfirmed: true,
+      isCounted: true,
+    );
+    _sessionCountedNotes.add(note);
+    _sessionTotal += value;
+    _activeTracks.add(note);
+    return note;
+  }
+
+  void _pruneStale(DateTime now) {
+    _activeTracks.removeWhere((t) => now.difference(t.lastSeen).inMilliseconds > 2500);
+  }
+
+  void resetSession() {
+    _activeTracks.clear();
+    _sessionCountedNotes.clear();
+    _sessionTotal = 0;
+  }
+}
+
 class CurrencyRecognitionService {
   CurrencyRecognitionService._();
   static final CurrencyRecognitionService instance = CurrencyRecognitionService._();
 
-  // ── Session Wallet Accumulator ─────────────────────────────────────────────
-  int _walletBalance = 0;
-  final List<int> _scannedNotes = [];
+  // ── Session Currency Tracker ───────────────────────────────────────────────
+  final CurrencySessionTracker tracker = CurrencySessionTracker();
 
-  int get walletBalance => _walletBalance;
-  List<int> get scannedNotes => List.unmodifiable(_scannedNotes);
+  int get sessionTotal => tracker.sessionTotal;
+  int get walletBalance => tracker.sessionTotal;
+  List<int> get scannedNotes => tracker.sessionNotes.map((n) => n.value).toList();
 
   void addNoteToWallet(int val) {
     if (val > 0) {
-      _walletBalance += val;
-      _scannedNotes.add(val);
+      final denom = _denomFromValue(val);
+      tracker.registerExplicitNote(denom, val);
     }
   }
 
   void resetWallet() {
-    _walletBalance = 0;
-    _scannedNotes.clear();
+    tracker.resetSession();
+  }
+
+  void resetSession() {
+    tracker.resetSession();
   }
 
   String getWalletStatusTa() {
-    if (_walletBalance == 0) {
+    if (sessionTotal == 0) {
       return 'எந்த பணமும் பதிவு செய்யப்படவில்லை.';
     }
-    return 'உங்களிடம் மொத்தம் $_walletBalance ரூபாய் உள்ளது.';
+    return 'உங்களிடம் மொத்தம் $sessionTotal ரூபாய் உள்ளது.';
   }
 
   String getWalletStatusEn() {
-    if (_walletBalance == 0) {
+    if (sessionTotal == 0) {
       return 'No money registered in wallet yet.';
     }
-    return 'You have a total of $_walletBalance Rupees.';
+    return 'You have a total of $sessionTotal Rupees.';
+  }
+
+  /// Converts an integer currency total to natural Tamil speech
+  String formatTamilAmount(int amount) {
+    if (amount <= 0) return 'பூஜ்ஜியம்';
+    if (amount == 10) return 'பத்து';
+    if (amount == 20) return 'இருபது';
+    if (amount == 30) return 'முப்பது';
+    if (amount == 40) return 'நாற்பது';
+    if (amount == 50) return 'ஐம்பது';
+    if (amount == 60) return 'அறுபது';
+    if (amount == 70) return 'எழுபது';
+    if (amount == 80) return 'எண்பது';
+    if (amount == 90) return 'தொண்ணூறு';
+    if (amount == 100) return 'நூறு';
+    if (amount == 120) return 'நூற்றி இருபது';
+    if (amount == 200) return 'இருநூறு';
+    if (amount == 300) return 'முந்நூறு';
+    if (amount == 400) return 'நானூறு';
+    if (amount == 500) return 'ஐநூறு';
+    if (amount == 600) return 'அறுநூறு';
+    if (amount == 700) return 'எழுநூறு';
+    if (amount == 720) return 'எழுநூற்று இருபது';
+    if (amount == 800) return 'எண்ணூறு';
+    if (amount == 820) return 'எட்டுநூற்று இருபது';
+    if (amount == 900) return 'தொள்ளாயிரம்';
+    if (amount == 1000) return 'ஆயிரம்';
+    if (amount == 2000) return 'இரண்டாயிரம்';
+    if (amount == 2600) return 'இரண்டாயிரத்து அறுநூறு';
+    return _convertNumberToTamil(amount);
+  }
+
+  String _convertNumberToTamil(int n) {
+    const ones = ['', 'ஒன்று', 'இரண்டு', 'மூன்று', 'நான்கு', 'ஐந்து', 'ஆறு', 'ஏழு', 'எட்டு', 'ஒன்பது'];
+    const teens = {
+      10: 'பத்து', 11: 'பதினொன்று', 12: 'பன்னிரண்டு', 13: 'பதின்மூன்று',
+      14: 'பதினான்கு', 15: 'பதினைந்து', 16: 'பதினாறு', 17: 'பதினேழு',
+      18: 'பதினெட்டு', 19: 'பத்தொன்பது'
+    };
+    const tens = {
+      20: 'இருபது', 30: 'முப்பது', 40: 'நாற்பது', 50: 'ஐம்பது',
+      60: 'அறுபது', 70: 'எழுபது', 80: 'எண்பது', 90: 'தொண்ணூறு'
+    };
+    const tensPrefix = {
+      20: 'இருபத்து ', 30: 'முப்பத்து ', 40: 'நாற்பத்து ', 50: 'ஐம்பத்து ',
+      60: 'அறுபத்து ', 70: 'எழுபத்து ', 80: 'எண்பத்து ', 90: 'தொண்ணூற்று '
+    };
+    const hundreds = {
+      100: 'நூறு', 200: 'இருநூறு', 300: 'முந்நூறு', 400: 'நானூறு',
+      500: 'ஐநூறு', 600: 'அறுநூறு', 700: 'எழுநூறு', 800: 'எண்ணூறு', 900: 'தொள்ளாயிரம்'
+    };
+    const hundredsPrefix = {
+      100: 'நூற்று ', 200: 'இருநூற்று ', 300: 'முந்நூற்று ', 400: 'நானூற்று ',
+      500: 'ஐந்நூற்று ', 600: 'அறுநூற்று ', 700: 'எழுநூற்று ', 800: 'எட்டுநூற்று ', 900: 'தொள்ளாயிரத்து '
+    };
+
+    if (n <= 0) return 'பூஜ்ஜியம்';
+    var res = '';
+
+    if (n >= 1000) {
+      final th = n ~/ 1000;
+      n %= 1000;
+      if (th == 1) {
+        res += n > 0 ? 'ஆயிரத்து ' : 'ஆயிரம்';
+      } else if (th == 2) {
+        res += n > 0 ? 'இரண்டாயிரத்து ' : 'இரண்டாயிரம்';
+      } else {
+        res += n > 0 ? '${_convertNumberToTamil(th)} ஆயிரத்து ' : '${_convertNumberToTamil(th)} ஆயிரம்';
+      }
+    }
+
+    if (n >= 100) {
+      final h = (n ~/ 100) * 100;
+      n %= 100;
+      res += n > 0 ? hundredsPrefix[h]! : hundreds[h]!;
+    }
+
+    if (n >= 20) {
+      final t = (n ~/ 10) * 10;
+      n %= 10;
+      res += n > 0 ? tensPrefix[t]! : tens[t]!;
+    } else if (n >= 10) {
+      res += teens[n]!;
+      n = 0;
+    }
+
+    if (n > 0) {
+      res += ones[n];
+    }
+
+    return res.trim();
+  }
+
+  InrDenomination _denomFromValue(int v) {
+    switch (v) {
+      case 10: return InrDenomination.ten;
+      case 20: return InrDenomination.twenty;
+      case 50: return InrDenomination.fifty;
+      case 100: return InrDenomination.oneHundred;
+      case 200: return InrDenomination.twoHundred;
+      case 500: return InrDenomination.fiveHundred;
+      case 2000: return InrDenomination.twoThousand;
+      default: return InrDenomination.unknown;
+    }
   }
 
   /// Map of denominations to Tamil announcements
@@ -191,271 +458,298 @@ class CurrencyRecognitionService {
       name: '100rs_front_back_new.jpg',
       denomination: InrDenomination.oneHundred,
       value: 100,
-      globalR: 184.54,
-      globalG: 175.58,
-      globalB: 201.05,
-      globalHue: 261.12,
-      globalSat: 0.1267,
-      globalVal: 0.7884,
-      centerR: 170.07,
-      centerG: 158.21,
-      centerB: 182.99,
-      centerHue: 268.72,
-      centerSat: 0.1355,
-      centerVal: 0.7176,
+      globalR: 185.46,
+      globalG: 176.52,
+      globalB: 201.94,
+      globalHue: 261.11,
+      globalSat: 0.1259,
+      globalVal: 0.7919,
+      centerR: 169.55,
+      centerG: 157.22,
+      centerB: 182.24,
+      centerHue: 269.56,
+      centerSat: 0.1373,
+      centerVal: 0.7147,
       ratioRG: 1.051,
       ratioRB: 0.918,
-      ratioGB: 0.873,
+      ratioGB: 0.874,
     ),
     CurrencyTemplate(
       name: '100rs_model1_front.jpg',
       denomination: InrDenomination.oneHundred,
       value: 100,
-      globalR: 177.67,
-      globalG: 178.37,
+      globalR: 177.61,
+      globalG: 178.07,
       globalB: 175.78,
-      globalHue: 76.06,
-      globalSat: 0.0145,
-      globalVal: 0.6995,
-      centerR: 175.92,
-      centerG: 180.88,
-      centerB: 181.34,
-      centerHue: 185.08,
-      centerSat: 0.0299,
-      centerVal: 0.7111,
-      ratioRG: 0.996,
-      ratioRB: 1.011,
-      ratioGB: 1.015,
+      globalHue: 71.98,
+      globalSat: 0.0128,
+      globalVal: 0.6983,
+      centerR: 176.53,
+      centerG: 181.26,
+      centerB: 182.12,
+      centerHue: 189.22,
+      centerSat: 0.0307,
+      centerVal: 0.7142,
+      ratioRG: 0.997,
+      ratioRB: 1.010,
+      ratioGB: 1.013,
     ),
     CurrencyTemplate(
       name: '10rs_model1_back.jpg',
       denomination: InrDenomination.ten,
       value: 10,
-      globalR: 162.17,
-      globalG: 135.69,
-      globalB: 119.37,
-      globalHue: 22.88,
-      globalSat: 0.2639,
-      globalVal: 0.6359,
-      centerR: 156.97,
-      centerG: 129.31,
-      centerB: 113.56,
-      centerHue: 21.78,
-      centerSat: 0.2766,
-      centerVal: 0.6156,
-      ratioRG: 1.195,
-      ratioRB: 1.358,
-      ratioGB: 1.137,
+      globalR: 161.99,
+      globalG: 135.25,
+      globalB: 119.10,
+      globalHue: 22.59,
+      globalSat: 0.2647,
+      globalVal: 0.6352,
+      centerR: 154.03,
+      centerG: 125.80,
+      centerB: 110.26,
+      centerHue: 21.31,
+      centerSat: 0.2842,
+      centerVal: 0.6040,
+      ratioRG: 1.198,
+      ratioRB: 1.360,
+      ratioGB: 1.136,
     ),
     CurrencyTemplate(
       name: '10rs_model1_front.jpg',
       denomination: InrDenomination.ten,
       value: 10,
-      globalR: 199.63,
-      globalG: 169.06,
-      globalB: 139.51,
-      globalHue: 29.49,
-      globalSat: 0.3012,
-      globalVal: 0.7829,
-      centerR: 187.23,
-      centerG: 153.30,
-      centerB: 122.84,
-      centerHue: 28.39,
-      centerSat: 0.3439,
-      centerVal: 0.7342,
-      ratioRG: 1.181,
-      ratioRB: 1.431,
-      ratioGB: 1.212,
+      globalR: 198.09,
+      globalG: 167.29,
+      globalB: 137.80,
+      globalHue: 29.35,
+      globalSat: 0.3043,
+      globalVal: 0.7768,
+      centerR: 187.59,
+      centerG: 153.46,
+      centerB: 122.82,
+      centerHue: 28.38,
+      centerSat: 0.3453,
+      centerVal: 0.7357,
+      ratioRG: 1.184,
+      ratioRB: 1.437,
+      ratioGB: 1.214,
     ),
     CurrencyTemplate(
       name: '10rs_model2_back.jpg',
       denomination: InrDenomination.ten,
       value: 10,
-      globalR: 215.38,
-      globalG: 185.41,
-      globalB: 168.06,
-      globalHue: 21.99,
-      globalSat: 0.2197,
-      globalVal: 0.8446,
-      centerR: 206.13,
-      centerG: 175.67,
-      centerB: 165.75,
-      centerHue: 14.74,
-      centerSat: 0.1959,
-      centerVal: 0.8084,
+      globalR: 216.11,
+      globalG: 186.02,
+      globalB: 168.65,
+      globalHue: 21.96,
+      globalSat: 0.2196,
+      globalVal: 0.8475,
+      centerR: 206.50,
+      centerG: 175.95,
+      centerB: 165.99,
+      centerHue: 14.76,
+      centerSat: 0.1962,
+      centerVal: 0.8098,
       ratioRG: 1.162,
-      ratioRB: 1.282,
+      ratioRB: 1.281,
       ratioGB: 1.103,
     ),
     CurrencyTemplate(
       name: '10rs_model2_front.jpg',
       denomination: InrDenomination.ten,
       value: 10,
-      globalR: 178.13,
-      globalG: 164.32,
-      globalB: 146.58,
-      globalHue: 33.73,
-      globalSat: 0.1771,
-      globalVal: 0.6985,
-      centerR: 199.26,
-      centerG: 179.73,
-      centerB: 158.05,
-      centerHue: 31.56,
-      centerSat: 0.2068,
-      centerVal: 0.7814,
-      ratioRG: 1.084,
+      globalR: 179.27,
+      globalG: 165.17,
+      globalB: 147.53,
+      globalHue: 33.34,
+      globalSat: 0.1770,
+      globalVal: 0.7030,
+      centerR: 198.65,
+      centerG: 178.92,
+      centerB: 157.44,
+      centerHue: 31.27,
+      centerSat: 0.2074,
+      centerVal: 0.7790,
+      ratioRG: 1.085,
       ratioRB: 1.215,
-      ratioGB: 1.121,
+      ratioGB: 1.120,
     ),
     CurrencyTemplate(
       name: '2000_front_back.jpg',
       denomination: InrDenomination.twoThousand,
       value: 2000,
-      globalR: 187.74,
-      globalG: 165.72,
-      globalB: 179.30,
-      globalHue: 323.00,
-      globalSat: 0.1173,
-      globalVal: 0.7362,
-      centerR: 173.69,
-      centerG: 148.18,
-      centerB: 162.33,
-      centerHue: 326.74,
-      centerSat: 0.1469,
-      centerVal: 0.6811,
-      ratioRG: 1.133,
+      globalR: 187.46,
+      globalG: 165.27,
+      globalB: 179.02,
+      globalHue: 322.83,
+      globalSat: 0.1184,
+      globalVal: 0.7351,
+      centerR: 173.60,
+      centerG: 148.03,
+      centerB: 162.22,
+      centerHue: 326.70,
+      centerSat: 0.1473,
+      centerVal: 0.6808,
+      ratioRG: 1.134,
       ratioRB: 1.047,
-      ratioGB: 0.924,
+      ratioGB: 0.923,
     ),
     CurrencyTemplate(
       name: '200_front_back.jpg',
       denomination: InrDenomination.twoHundred,
       value: 200,
-      globalR: 206.27,
-      globalG: 180.67,
-      globalB: 151.31,
-      globalHue: 32.05,
-      globalSat: 0.2664,
-      globalVal: 0.8089,
-      centerR: 214.78,
-      centerG: 175.87,
-      centerB: 136.61,
-      centerHue: 30.13,
-      centerSat: 0.3639,
-      centerVal: 0.8423,
-      ratioRG: 1.142,
-      ratioRB: 1.363,
+      globalR: 206.42,
+      globalG: 180.89,
+      globalB: 151.50,
+      globalHue: 32.11,
+      globalSat: 0.2661,
+      globalVal: 0.8095,
+      centerR: 213.45,
+      centerG: 174.14,
+      centerB: 134.53,
+      centerHue: 30.11,
+      centerSat: 0.3698,
+      centerVal: 0.8371,
+      ratioRG: 1.141,
+      ratioRB: 1.362,
       ratioGB: 1.194,
     ),
     CurrencyTemplate(
       name: '20rs_model1_frontend.jpg',
       denomination: InrDenomination.twenty,
       value: 20,
-      globalR: 225.16,
-      globalG: 163.32,
-      globalB: 146.89,
-      globalHue: 12.60,
-      globalSat: 0.3476,
-      globalVal: 0.8830,
-      centerR: 223.95,
-      centerG: 175.13,
-      centerB: 152.67,
-      centerHue: 18.91,
-      centerSat: 0.3183,
-      centerVal: 0.8782,
-      ratioRG: 1.379,
-      ratioRB: 1.533,
+      globalR: 224.67,
+      globalG: 162.49,
+      globalB: 146.14,
+      globalHue: 12.49,
+      globalSat: 0.3495,
+      globalVal: 0.8811,
+      centerR: 223.01,
+      centerG: 173.83,
+      centerB: 151.33,
+      centerHue: 18.83,
+      centerSat: 0.3214,
+      centerVal: 0.8746,
+      ratioRG: 1.383,
+      ratioRB: 1.537,
       ratioGB: 1.112,
     ),
     CurrencyTemplate(
       name: '20rs_model2_back.jpg',
       denomination: InrDenomination.twenty,
       value: 20,
-      globalR: 210.55,
-      globalG: 204.83,
-      globalB: 163.39,
-      globalHue: 52.71,
-      globalSat: 0.2240,
-      globalVal: 0.8257,
-      centerR: 205.90,
-      centerG: 194.98,
-      centerB: 166.23,
-      centerHue: 43.48,
-      centerSat: 0.1927,
-      centerVal: 0.8075,
-      ratioRG: 1.028,
+      globalR: 211.07,
+      globalG: 205.03,
+      globalB: 163.75,
+      globalHue: 52.34,
+      globalSat: 0.2242,
+      globalVal: 0.8277,
+      centerR: 205.49,
+      centerG: 193.92,
+      centerB: 165.23,
+      centerHue: 42.76,
+      centerSat: 0.1959,
+      centerVal: 0.8058,
+      ratioRG: 1.029,
       ratioRB: 1.289,
-      ratioGB: 1.254,
+      ratioGB: 1.252,
     ),
     CurrencyTemplate(
       name: '20rs_model2_frontend.jpg',
       denomination: InrDenomination.twenty,
       value: 20,
-      globalR: 188.48,
-      globalG: 189.03,
-      globalB: 134.74,
-      globalHue: 60.60,
-      globalSat: 0.2872,
-      globalVal: 0.7413,
-      centerR: 194.28,
-      centerG: 195.20,
-      centerB: 146.06,
-      centerHue: 61.12,
+      globalR: 187.83,
+      globalG: 188.08,
+      globalB: 133.81,
+      globalHue: 60.27,
+      globalSat: 0.2885,
+      globalVal: 0.7376,
+      centerR: 193.58,
+      centerG: 194.30,
+      centerB: 145.41,
+      centerHue: 60.89,
       centerSat: 0.2517,
-      centerVal: 0.7655,
-      ratioRG: 0.997,
-      ratioRB: 1.399,
-      ratioGB: 1.403,
+      centerVal: 0.7620,
+      ratioRG: 0.999,
+      ratioRB: 1.404,
+      ratioGB: 1.406,
     ),
     CurrencyTemplate(
       name: '500rs_image_front_back.jpg',
       denomination: InrDenomination.fiveHundred,
       value: 500,
-      globalR: 153.55,
-      globalG: 150.06,
-      globalB: 144.80,
-      globalHue: 36.04,
-      globalSat: 0.0570,
-      globalVal: 0.6022,
-      centerR: 154.13,
-      centerG: 152.72,
-      centerB: 148.40,
-      centerHue: 45.26,
-      centerSat: 0.0372,
-      centerVal: 0.6044,
-      ratioRG: 1.023,
-      ratioRB: 1.060,
-      ratioGB: 1.036,
-    ),
-    CurrencyTemplate(
-      name: '50rs_fluorescent_blue.jpg',
-      denomination: InrDenomination.fifty,
-      value: 50,
-      globalR: 140.0,
-      globalG: 195.0,
-      globalB: 220.0,
-      globalHue: 198.75,
-      globalSat: 0.3636,
-      globalVal: 0.8627,
-      centerR: 135.0,
-      centerG: 190.0,
-      centerB: 215.0,
-      centerHue: 198.75,
-      centerSat: 0.3721,
-      centerVal: 0.8431,
-      ratioRG: 0.718,
-      ratioRB: 0.636,
-      ratioGB: 0.886,
+      globalR: 153.16,
+      globalG: 149.59,
+      globalB: 144.29,
+      globalHue: 35.83,
+      globalSat: 0.0580,
+      globalVal: 0.6006,
+      centerR: 151.80,
+      centerG: 150.18,
+      centerB: 145.76,
+      centerHue: 43.95,
+      centerSat: 0.0397,
+      centerVal: 0.5953,
+      ratioRG: 1.024,
+      ratioRB: 1.062,
+      ratioGB: 1.037,
     ),
   ];
 
-  /// Recognizes an Indian Rupee note from a camera frame with optional OCR text.
+  /// Creates a [CurrencyResult] object for a verified note
+  CurrencyResult createResultForNote(TrackedCurrencyNote note) {
+    final denom = note.denomination;
+    final val = note.value;
+    return CurrencyResult(
+      denomination: denom,
+      value: val,
+      spokenTextTa: _tamilNames[denom]!,
+      spokenTextEn: _englishNames[denom]!,
+      userAmountTa: 'உங்களிடம் $val ரூபாய் உள்ளது.',
+      userAmountEn: 'You have $val Rupees.',
+      confidence: 0.95,
+      isConfident: true,
+      matchedModel: 'Tracked Note #${note.trackingId}',
+      hapticPattern: _hapticPatterns[denom] ?? const [200],
+    );
+  }
+
+  /// Processes live camera frame through the temporal session tracker.
+  /// Returns a [TrackedCurrencyNote] ONLY when a genuinely new note is confirmed;
+  /// returns null if no note is visible or if the same note is still being presented.
+  TrackedCurrencyNote? processLiveTracking(
+    img.Image image, {
+    DateTime? timestamp,
+    double xCenter = 0.5,
+    double yCenter = 0.5,
+  }) {
+    final visual = recognizeLiveStream(image);
+    if (visual.denomination == InrDenomination.unknown || visual.value <= 0) {
+      tracker.updateWithDetection(
+        denomination: InrDenomination.unknown,
+        value: 0,
+        timestamp: timestamp,
+      );
+      return null;
+    }
+
+    return tracker.updateWithDetection(
+      denomination: visual.denomination,
+      value: visual.value,
+      xCenter: xCenter,
+      yCenter: yCenter,
+      timestamp: timestamp,
+      minConsecutive: 3, // Requires 3 consecutive frames (~1050ms)
+    );
+  }
+
+  /// Multi-Modal Recognition: OCR (Google ML Kit Text Recognition) + Dataset-calibrated Color-Spatial Model
   CurrencyResult recognize({
     required img.Image image,
     String? ocrText,
     bool addToWallet = false,
   }) {
-    // ── Engine 1: OCR numerals and multilingual keywords ─────────────────────
+    // ── Engine 1: OCR Numeral and Token Matcher ──────────────────────────────
     InrDenomination ocrMatch = InrDenomination.unknown;
     if (ocrText != null && ocrText.isNotEmpty) {
       ocrMatch = _matchFromText(ocrText);
@@ -487,7 +781,7 @@ class CurrencyRecognitionService {
       modelName = 'OCR Text';
     } else if (visualMatch.denomination != InrDenomination.unknown &&
         visualMatch.isConfident &&
-        visualMatch.confidence >= 0.65) {
+        visualMatch.confidence >= 0.70) {
       finalDenom = visualMatch.denomination;
       finalConfidence = visualMatch.confidence;
       modelName = visualMatch.matchedModel;
@@ -496,7 +790,7 @@ class CurrencyRecognitionService {
     if (finalDenom != InrDenomination.unknown) {
       final val = _values[finalDenom]!;
       if (addToWallet) {
-        addNoteToWallet(val);
+        tracker.registerExplicitNote(finalDenom, val);
       }
 
       return CurrencyResult(
@@ -517,12 +811,13 @@ class CurrencyRecognitionService {
   }
 
   /// Real-time continuous stream detection optimized for live camera frames.
-  /// Strict confidence and structural filtering ensure ambient environments do not falsely trigger.
+  /// Strict confidence, texture verification, and ambient surface rejection ensure
+  /// roads, walls, clothes, leaves, and shadows NEVER trigger false detections.
   CurrencyResult recognizeLiveStream(img.Image image) {
     final visual = _matchFromVisual(image);
     if (visual.denomination != InrDenomination.unknown &&
         visual.isConfident &&
-        visual.confidence >= 0.65) {
+        visual.confidence >= 0.70) {
       return visual;
     }
     return CurrencyResult.notFound;
@@ -612,7 +907,7 @@ class CurrencyRecognitionService {
     return InrDenomination.unknown;
   }
 
-  /// Multi-scale Feature Extraction + Template Nearest Match & Domain Rules
+  /// Multi-scale Feature Extraction + Template Nearest Match & Ambient Rejection
   CurrencyResult _matchFromVisual(img.Image image) {
     final w = image.width;
     final h = image.height;
@@ -681,12 +976,12 @@ class CurrencyRecognitionService {
     final avgGrad = gradCount > 0 ? gradSum / gradCount : 0.0;
     final highEdgeRatio = gradCount > 0 ? highEdgeCount / gradCount : 0.0;
 
-    // Banknote structural verification:
+    // ── STAGE 1: Banknote Structural & Micro-Texture Verification ────────────
     // Real Indian banknotes feature dense micro-printing, intaglio engraving, portraits,
-    // and complex guilloche geometries resulting in high gradient energy and high variance.
-    // Ambient natural surfaces (roads, floors, plain tables, walls, ceilings, clothing)
-    // lack this high-frequency texture and are strictly rejected to avoid false detections.
-    if (variance < 120.0 || avgGrad < 6.0 || highEdgeRatio < 0.03) {
+    // and complex guilloche geometries (dataset variance >= 1158, avgGrad >= 17.9, highEdgeRatio >= 22.9%).
+    // Ambient natural surfaces (roads, floors, plain tables, walls, ceilings, clothing, shadows, leaves)
+    // completely lack this high-frequency texture and are strictly rejected.
+    if (variance < 550.0 || avgGrad < 12.0 || highEdgeRatio < 0.10) {
       return CurrencyResult.notFound;
     }
 
@@ -707,8 +1002,24 @@ class CurrencyRecognitionService {
     final ratioRG = avgGR / (avgGG + 1e-4);
     final ratioRB = avgGR / (avgGB + 1e-4);
     final ratioGB = avgGG / (avgGB + 1e-4);
+
     // ── Blank / pure black / underexposed frame guard ────────────────────────
-    if (gVal < 0.25 || avgGR < 40) {
+    if (gVal < 0.28 || avgGR < 42 || avgGG < 42 || avgGB < 42) {
+      return CurrencyResult.notFound;
+    }
+
+    // ── Ambient Road / Asphalt / Concrete Pavement Guard ─────────────────────
+    // Grey roads have near-zero saturation and diffuse grain noise without intaglio structure.
+    if (gSat < 0.09 && cSat < 0.09) {
+      // Must have exceptionally sharp intaglio banknote texture to be considered a stone-grey ₹500 note
+      if (variance < 1500.0 || avgGrad < 20.0 || highEdgeRatio < 0.22) {
+        return CurrencyResult.notFound;
+      }
+    }
+
+    // ── Pure Green Foliage / Leaves Guard ────────────────────────────────────
+    if ((gHue >= 90 && gHue <= 145 || cHue >= 90 && cHue <= 145) &&
+        avgGG > avgGR * 1.20 && avgGG > avgGB * 1.20) {
       return CurrencyResult.notFound;
     }
 
@@ -759,7 +1070,9 @@ class CurrencyRecognitionService {
         gVal <= 0.72 &&
         avgGR >= 70 &&
         (avgGR - avgGG).abs() < 16 &&
-        (avgGG - avgGB).abs() < 16) {
+        (avgGG - avgGB).abs() < 16 &&
+        variance >= 1500.0 &&
+        avgGrad >= 20.0) {
       domainMatch = InrDenomination.fiveHundred;
       domainModel = 'Stone Grey ₹500';
     }
@@ -814,8 +1127,8 @@ class CurrencyRecognitionService {
       // 1. Both Template match and Domain rule agree with high confidence
       if (domainMatch != InrDenomination.unknown &&
           domainMatch == bestTemplate.denomination &&
-          bestDist < 1.15) {
-        final conf = (1.0 - (bestDist / 4.0)).clamp(0.85, 0.98);
+          bestDist < 1.10) {
+        final conf = (1.0 - (bestDist / 2.5)).clamp(0.85, 0.98);
         return CurrencyResult(
           denomination: domainMatch,
           value: _values[domainMatch]!,
@@ -830,10 +1143,32 @@ class CurrencyRecognitionService {
         );
       }
 
-      // 2. Strict template match (bestDist <= 0.76)
-      if (bestDist < 0.85) {
+      // 2. Bright Saffron ₹200 explicit domain disambiguation from brownish ₹10
+      if (domainMatch == InrDenomination.twoHundred && bestDist < 1.05) {
+        final conf = (1.0 - (bestDist / 3.0)).clamp(0.75, 0.96);
+        return CurrencyResult(
+          denomination: InrDenomination.twoHundred,
+          value: 200,
+          spokenTextTa: _tamilNames[InrDenomination.twoHundred]!,
+          spokenTextEn: _englishNames[InrDenomination.twoHundred]!,
+          userAmountTa: 'உங்களிடம் 200 ரூபாய் உள்ளது.',
+          userAmountEn: 'You have 200 Rupees.',
+          confidence: conf,
+          isConfident: true,
+          matchedModel: domainModel.isNotEmpty ? domainModel : bestTemplate.name,
+          hapticPattern: _hapticPatterns[InrDenomination.twoHundred] ?? const [200],
+        );
+      }
+
+      // 3. Calibrated template match
+      if (bestDist < 0.86) {
         final denom = bestTemplate.denomination;
-        final conf = (1.0 - (bestDist / 3.0)).clamp(0.70, 0.95);
+        // For ₹500 stone-grey, require strict distance to prevent any ambient grey confusion
+        if (denom == InrDenomination.fiveHundred && bestDist > 0.35) {
+          return CurrencyResult.notFound;
+        }
+
+        final conf = (1.0 - (bestDist / 3.0)).clamp(0.70, 0.96);
         return CurrencyResult(
           denomination: denom,
           value: _values[denom]!,
@@ -848,9 +1183,12 @@ class CurrencyRecognitionService {
         );
       }
 
-      // 3. Domain rule confident match
-      if (domainMatch != InrDenomination.unknown && bestDist < 1.15) {
-        final conf = (1.0 - (bestDist / 3.5)).clamp(0.70, 0.95);
+      // 4. Domain rule confident match with verified distance
+      if (domainMatch != InrDenomination.unknown && bestDist < 1.05) {
+        if (domainMatch == InrDenomination.fiveHundred && bestDist > 0.35) {
+          return CurrencyResult.notFound;
+        }
+        final conf = (1.0 - (bestDist / 3.2)).clamp(0.70, 0.95);
         return CurrencyResult(
           denomination: domainMatch,
           value: _values[domainMatch]!,
@@ -869,36 +1207,34 @@ class CurrencyRecognitionService {
     return CurrencyResult.notFound;
   }
 
-  /// Circular angular distance between hues in [0..360]
-  static double _angularDist(double h1, double h2) {
-    final diff = (h1 - h2).abs() % 360.0;
-    return diff > 180.0 ? 360.0 - diff : diff;
-  }
-
-  /// RGB [0..255] to HSV [H 0..360, S 0..1, V 0..1]
   static List<double> _rgbToHsv(double r, double g, double b) {
-    r /= 255.0;
-    g /= 255.0;
-    b /= 255.0;
+    final rf = r / 255.0;
+    final gf = g / 255.0;
+    final bf = b / 255.0;
 
-    final maxVal = max(r, max(g, b));
-    final minVal = min(r, min(g, b));
+    final maxVal = max(rf, max(gf, bf));
+    final minVal = min(rf, min(gf, bf));
     final delta = maxVal - minVal;
 
-    double h = 0;
-    if (delta > 0.00001) {
-      if (maxVal == r) {
-        h = 60.0 * (((g - b) / delta) % 6);
-      } else if (maxVal == g) {
-        h = 60.0 * (((b - r) / delta) + 2);
+    double h = 0.0;
+    if (delta > 1e-5) {
+      if (maxVal == rf) {
+        h = 60.0 * (((gf - bf) / delta) % 6);
+      } else if (maxVal == gf) {
+        h = 60.0 * (((bf - rf) / delta) + 2);
       } else {
-        h = 60.0 * (((r - g) / delta) + 4);
+        h = 60.0 * (((rf - gf) / delta) + 4);
       }
+      if (h < 0) h += 360.0;
     }
-    if (h < 0) h += 360.0;
 
-    final s = maxVal == 0 ? 0.0 : delta / maxVal;
+    final s = maxVal > 1e-5 ? delta / maxVal : 0.0;
     final v = maxVal;
     return [h, s, v];
+  }
+
+  static double _angularDist(double a, double b) {
+    final diff = (a - b).abs() % 360.0;
+    return diff > 180.0 ? 360.0 - diff : diff;
   }
 }

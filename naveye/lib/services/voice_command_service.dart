@@ -20,6 +20,7 @@ enum VoiceCommand {
   cancel,
   goBack,
   identifyCurrency,
+  resetWallet,
   readText,
   findObject,
   emergencySOS,
@@ -217,6 +218,13 @@ class VoiceCommandService {
     }
     if (_has(lower, ['repeat', 'again', 'say again', 'what was that', 'pardon', 'what did', 'மீண்டும்', 'திரும்ப'])) {
       return VoiceCommand.repeat;
+    }
+    // Reset Currency Session / Wallet
+    if (_has(lower, [
+      'பணத்தை மீட்டமை', 'மீட்டமை', 'பணத்தை அழி', 'பணம் அழி', 'reset money',
+      'reset wallet', 'clear wallet', 'clear money', 'reset session', 'வங்கி மீட்டமை'
+    ])) {
+      return VoiceCommand.resetWallet;
     }
     // 3. Assistive Utilities — Currency / Money Identifier
     if (_has(lower, [

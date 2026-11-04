@@ -215,6 +215,39 @@ class DetectorService {
     'teddy bear':    0.35,
   };
 
+  // ── Typical real-world aspect ratios (width / height) for edge-truncation calibration
+  static const Map<String, double> _aspectRatios = {
+    'person':        0.35,
+    'bicycle':       1.60,
+    'car':           1.30,
+    'motorcycle':    1.20,
+    'airplane':      1.50,
+    'bus':           0.85,
+    'train':         0.80,
+    'truck':         0.90,
+    'traffic light': 0.35,
+    'fire hydrant':  0.60,
+    'stop sign':     0.90,
+    'bench':         1.80,
+    'bird':          0.80,
+    'cat':           1.30,
+    'dog':           1.20,
+    'horse':         1.40,
+    'cow':           1.40,
+    'backpack':      0.70,
+    'umbrella':      1.00,
+    'chair':         0.65,
+    'couch':         1.70,
+    'potted plant':  0.70,
+    'dining table':  1.40,
+    'bed':           1.50,
+    'tv':            1.50,
+    'laptop':        1.40,
+    'cell phone':    0.50,
+    'bottle':        0.35,
+    'cup':           0.85,
+  };
+
   // ── Minimum confidence per class ───────────────────────────────────────────
   static const Map<String, double> _minConf = {
     'person':        0.40,
@@ -453,17 +486,37 @@ class DetectorService {
 
       final direction = xCtr < 0.35 ? 'left' : xCtr > 0.65 ? 'right' : 'center';
       final realH     = _heights[rawLabel] ?? 1.0;
-      final effH      = (boxH > boxW * 0.6) ? boxH : boxW * 0.6;
+      // Handle edge-truncated bounding boxes (e.g. object entering/leaving top/bottom of frame)
+      final isVertTrunc = yMin <= 0.01 || yMax >= 0.99;
+      final isHorizTrunc = xMin <= 0.01 || xMax >= 0.99;
+      final aspect = _aspectRatios[rawLabel] ?? 0.60;
+
+      double effH;
+      if (isVertTrunc && !isHorizTrunc && boxW > 0.05) {
+        // Height truncated at top or bottom edge: infer true visual height from width
+        effH = math.max(boxH, boxW / aspect);
+      } else {
+        effH = (boxH > boxW * 0.6) ? boxH : boxW * 0.6;
+      }
       final distM     = (0.866 * realH / effH).clamp(0.3, 15.0);
       final distDisp  = distM < 1.0
           ? '${(distM * 100).round()} cm'
           : distM < 10.0 ? '${distM.toStringAsFixed(1)} m'
                          : '${distM.round()} m';
 
-      final isWall = rawLabel != 'person'
-          && rawLabel != 'laptop' && rawLabel != 'cell phone'
-          && rawLabel != 'remote' && rawLabel != 'book'
-          && boxW > 0.68 && distM < 2.0;
+      const vehicleClasses = {'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'train', 'boat', 'airplane'};
+      const animalClasses = {'dog', 'cat', 'horse', 'cow', 'bird'};
+      const safeItems = {'laptop', 'cell phone', 'remote', 'book', 'bottle', 'cup', 'chair', 'couch', 'tv'};
+      final isBarrierClass = rawLabel == 'wall' || rawLabel == 'door' || rawLabel == 'building';
+      final isWall = !isBarrierClass &&
+          rawLabel != 'person' &&
+          !vehicleClasses.contains(rawLabel) &&
+          !animalClasses.contains(rawLabel) &&
+          !safeItems.contains(rawLabel) &&
+          boxW > 0.75 && boxH > 0.60 && distM < 1.5;
+
+
+
 
       results.add(DetectionResult(
         label:           _friendly[rawLabel] ?? _cap(rawLabel),

@@ -244,10 +244,10 @@ class _MainAIScreenState extends State<MainAIScreen>
   Timer? _currencyDismissTimer;
   DateTime _lastCurrencyAutoCheck = DateTime.fromMillisecondsSinceEpoch(0);
 
-  InrDenomination _lastCandidateDenom = InrDenomination.unknown;
-  InrDenomination _lastAnnouncedDenom = InrDenomination.unknown;
-  int _currencyStabilityCount = 0;
-  int _currencyClearStreak = 0;
+
+
+
+
   bool _autoCurrencyDetectionEnabled = true;
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -553,75 +553,41 @@ class _MainAIScreenState extends State<MainAIScreen>
           !_detectionPausedForVoice &&
           now.difference(_lastCurrencyAutoCheck).inMilliseconds >= 350) {
         _lastCurrencyAutoCheck = now;
-        final curr = CurrencyRecognitionService.instance.recognizeLiveStream(image);
-        if (curr.isConfident && curr.value > 0) {
-          // Reset clear streak since banknote is present in frame
-          _currencyClearStreak = 0;
+        final newNote = CurrencyRecognitionService.instance.processLiveTracking(image, timestamp: now);
+        if (newNote != null) {
+          final curr = CurrencyRecognitionService.instance.createResultForNote(newNote);
 
-          if (curr.denomination == _lastCandidateDenom) {
-            _currencyStabilityCount++;
-          } else {
-            _lastCandidateDenom = curr.denomination;
-            _currencyStabilityCount = 1;
+
+          // Update HUD & state
+          if (mounted) {
+            setState(() {
+              _activeCurrencyResult = curr;
+              _showCurrencyOledOverlay = true;
+            });
           }
 
-          // Confirmed across at least 3 consecutive checks (~1050ms temporal stability)
-          // to ensure a genuine, stable banknote is presented
-          if (_currencyStabilityCount >= 2) {
-            final isNewDenom = curr.denomination != _lastAnnouncedDenom;
+          // Haptic tactile pulse pattern for visually impaired perception
+          if (_vibrationEnabled && await Vibration.hasVibrator() == true) {
+            Vibration.vibrate(pattern: curr.hapticPattern);
+          }
 
-            // Announce ONLY ONCE per note presentation (do not repeat every few seconds)
-            if (isNewDenom) {
-              _lastAnnouncedDenom = curr.denomination;
+          // Voice announcement answering Modules 1, 2, 6:
+          // e.g. "ஐநூறு ரூபாய் நோட்டு கண்டறியப்பட்டது. மொத்த தொகை எட்டுநூற்று இருபது ரூபாய்."
+          final totalAmountTa = CurrencyRecognitionService.instance
+              .formatTamilAmount(CurrencyRecognitionService.instance.sessionTotal);
+          final announcement =
+              '${curr.spokenTextTa} கண்டறியப்பட்டது. மொத்த தொகை $totalAmountTa ரூபாய்.';
+          await _tts.speakNow(announcement);
 
-
-              // Automatically add to session wallet accumulator ONLY ONCE
-              CurrencyRecognitionService.instance.addNoteToWallet(curr.value);
-
-              // Update HUD & state
-              if (mounted) {
-                setState(() {
-                  _activeCurrencyResult = curr;
-                  _showCurrencyOledOverlay = true;
-                });
-              }
-
-              // Haptic tactile pulse pattern for visually impaired perception
-              if (_vibrationEnabled && await Vibration.hasVibrator() == true) {
-                Vibration.vibrate(pattern: curr.hapticPattern);
-              }
-
-              // Multilingual voice announcement - speaks ONLY ONCE
-              final walletTotal = CurrencyRecognitionService.instance.walletBalance;
-              final totalText = walletTotal > curr.value
-                  ? 'மொத்த பணம் $walletTotal ரூபாய்.'
-                  : '';
-              final announcement =
-                  '${curr.userAmountTa} ${curr.spokenTextTa}. $totalText';
-              await _tts.speakNow(announcement);
-
-              // Auto-dismiss OLED HUD overlay quickly so user returns to navigation
-              _currencyDismissTimer?.cancel();
-              _currencyDismissTimer = Timer(const Duration(milliseconds: 1500), () {
-                if (mounted) {
-                  setState(() {
-                    _showCurrencyOledOverlay = false;
-                  });
-                }
+          // Auto-dismiss OLED HUD overlay after 1.5 seconds so user returns to navigation
+          _currencyDismissTimer?.cancel();
+          _currencyDismissTimer = Timer(const Duration(milliseconds: 1500), () {
+            if (mounted) {
+              setState(() {
+                _showCurrencyOledOverlay = false;
               });
             }
-          }
-        } else {
-          // Note is not shown or has left the camera view
-          _currencyStabilityCount = 0;
-          _lastCandidateDenom = InrDenomination.unknown;
-          _currencyClearStreak++;
-
-          // Once no banknote has been seen for at least 4 consecutive checks (~1.4s),
-          // reset the announced note memory so a subsequent note can be detected.
-          if (_currencyClearStreak >= 4 && _lastAnnouncedDenom != InrDenomination.unknown) {
-            _lastAnnouncedDenom = InrDenomination.unknown;
-          }
+          });
         }
       }
 
@@ -902,6 +868,10 @@ class _MainAIScreenState extends State<MainAIScreen>
         } else {
           await _tts.speakAndWait('அவசர தொடர்பு எண் பதிவு செய்யப்படவில்லை. இருப்பிடம் சேமிக்கப்பட்டது.');
         }
+        break;
+      case VoiceCommand.resetWallet:
+        CurrencyRecognitionService.instance.resetSession();
+        await _tts.speakAndWait('பண விபரம் மீட்டமைக்கப்பட்டது. இருப்பு பூஜ்ஜியம் ரூபாய்.');
         break;
       case VoiceCommand.identifyCurrency:
         await _identifyCurrencyNow();
